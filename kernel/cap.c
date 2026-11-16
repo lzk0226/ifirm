@@ -38,7 +38,9 @@ static ifirm_status_t grant_at(u16 dom_id, u8 type, u32 object_id, u16 rights,
                                u32 derived_from, cap_t *out)
 {
     domain_t *d = domain_get(dom_id);
-    if (d == NULL || d->state == DOMAIN_FREE) { return IFIRM_ERR_INVALID_ARG; }
+    if (d == NULL || d->state == DOMAIN_FREE || d->state == DOMAIN_DEAD) {
+        return IFIRM_ERR_INVALID_ARG;      /* 死域不再接受新句柄，避免回收前的窗口 */
+    }
     if ((rights & ~CAP_RIGHTS_ALL) != 0u || rights == 0u) { return IFIRM_ERR_DENIED; }
 
     for (u32 idx = 1; idx < 256u; idx++) {

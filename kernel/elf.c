@@ -57,7 +57,8 @@ static ifirm_status_t load_seg(u64 *root, const u8 *img, u64 len, u64 phoff, u32
     u64 memsz  = rd64(img + phoff + 40u);
 
     if (memsz == 0u) { return IFIRM_OK; }
-    if (off + filesz > len) { return IFIRM_ERR_CORRUPT; }
+    /* 减法形式：提前用加法判断会在 off 很大时回绕，把越界文件放进来 */
+    if (off > len || filesz > len - off) { return IFIRM_ERR_CORRUPT; }
     if (vaddr + memsz < vaddr) { return IFIRM_ERR_OVERFLOW; }
 
     u64 done = 0u;
@@ -100,7 +101,7 @@ ifirm_status_t elf_load(u64 *root, const u8 *img, u64 len, elf_info_t *info)
 
     u64 phoff = rd64(img + 32u);
     u16 phnum = rd16(img + 56u);
-    if (phoff + (u64)phnum * 56u > len) { return IFIRM_ERR_CORRUPT; }
+    if (phoff > len || (u64)phnum > (len - phoff) / 56u) { return IFIRM_ERR_CORRUPT; }
 
     info->entry = rd64(img + 24u);
     info->segs = 0u;

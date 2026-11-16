@@ -232,7 +232,7 @@ u32 ca_drain(void)
     return done;
 }
 
-i64 ca_queue_poll(u32 ticket, cap_t *out)
+i64 ca_queue_poll(u8 dom, u32 ticket, cap_t *out)
 {
     u32 slot = ticket & 0xFFu;
     u32 gen  = ticket >> 8;
@@ -241,6 +241,8 @@ i64 ca_queue_poll(u32 ticket, cap_t *out)
     if (e->state == CA_Q_FREE || (e->ticket >> 8) != gen) {
         return (i64)IFIRM_ERR_NOT_FOUND;
     }
+    /* 票号不跨域：别人的票既不能取走结果，也不能释放槽位 */
+    if (e->dom != dom) { return (i64)IFIRM_ERR_DENIED; }
     if (e->state == CA_Q_PENDING) { return (i64)IFIRM_ERR_AGAIN; }
     i32 r = e->result;
     if (r == 0 && out != NULL) { *out = e->cap; }
@@ -272,10 +274,19 @@ i64 ca_queue_selftest(void)
     u32 ok = 0u;
     u32 deny = 0u;
     u32 bad = 0u;
+    u32 steal = 0u;
     for (u32 i = 0; i < CA_QUEUE_MAX; i++) {
         if (tk[i] <= 0) { bad++; continue; }
+        u8 owner = (i < 5u) ? 1u : 3u;
+        /* 域 2 拿域 1 的票号试一次：必须被拒绝，且不能把槽位释放掉 */
+        if (i == 0u) {
+            cap_t stolen = 0u;
+            if (ca_queue_poll(2u, (u32)tk[i], &stolen) == (i64)IFIRM_ERR_DENIED) {
+                steal = 1u;
+            }
+        }
         cap_t h = 0u;
-        i64 st = ca_queue_poll((u32)tk[i], &h);
+        i64 st = ca_queue_poll(owner, (u32)tk[i], &h);
         if (st == 0) {
             ok++;
             (void)cap_revoke(1u, (u16)((u32)h & CAP_IDX_MASK));
@@ -288,9 +299,9 @@ i64 ca_queue_selftest(void)
 
     bool pass = (depth_full == CA_QUEUE_MAX) && (full == (i64)IFIRM_ERR_AGAIN) &&
                 (drained == CA_QUEUE_MAX) && (ok == want_ok) && (deny == want_deny) &&
-                (bad == 0u) && (ca_queue_depth() == 0u);
-    printk("IFIRM-CA queue depth=%u full=%d drained=%u ok=%u deny=%u test=%s\n",
-           (u32)depth_full, (i32)full, (u32)drained, (u32)ok, (u32)deny,
+                (bad == 0u) && (steal == 1u) && (ca_queue_depth() == 0u);
+    printk("IFIRM-CA queue depth=%u full=%d drained=%u ok=%u deny=%u steal=%u test=%s\n",
+           (u32)depth_full, (i32)full, (u32)drained, (u32)ok, (u32)deny, (u32)steal,
            pass ? "ok" : "fail");
     return pass ? IFIRM_OK : IFIRM_ERR_INVALID_STATE;
 }

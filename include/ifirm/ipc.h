@@ -30,6 +30,8 @@ ifirm_status_t ipc_channel_create(u8 dom_a, u8 dom_b);
 channel_t     *ipc_channel_get(u32 id);
 ifirm_status_t ipc_enqueue(channel_t *ch, const u8 *msg, u32 len);
 ifirm_status_t ipc_dequeue(channel_t *ch, u8 *buf, u32 *len);
+/* 只看队首长度，不出队：投递方据此判断接收缓冲够不够 */
+ifirm_status_t ipc_peek_len(channel_t *ch, u32 *len);
 ifirm_status_t ipc_send(channel_t *ch, u8 from_dom, const u8 *msg, u32 len, bool nonblock);
 ifirm_status_t ipc_recv(channel_t *ch, u8 from_dom, u8 *buf, u32 cap, u32 *out_len);
 

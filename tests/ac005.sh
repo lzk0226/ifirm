@@ -18,7 +18,7 @@ forbid() {
 }
 
 # 1) 启动期自检：8 槽填满、第 9 条被背压挡住、批量处理、5 授予 3 拒绝
-need "IFIRM-CA queue depth=8 full=-11 drained=8 ok=5 deny=3 test=ok"
+need "IFIRM-CA queue depth=8 full=-11 drained=8 ok=5 deny=3 steal=1 test=ok"
 need "IFIRM-CA drain n=8"
 
 # 2) 域在运行期走异步路径：入队拿票号，而不是阻塞到授权完成

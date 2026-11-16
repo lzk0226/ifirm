@@ -346,6 +346,7 @@ i64 fs_unlink(const char *path)
     i64 r = lookup_ino(path);
     if (r < 0) { return r; }
     u32 ino = (u32)r;
+    if (ino == rd32(g_sb + 40u)) { return (i64)IFIRM_ERR_INVALID_ARG; }  /* 根目录不可删除 */
     inode_t *e = ino_at(ino);
     if (e->type == FS_TYPE_DIR) {
         for (u32 i = 1u; i < FS_MAX_INODES; i++) {
@@ -400,7 +401,7 @@ i64 fs_write(u32 ino, u32 off, const void *buf, u32 len)
     if (ino == 0u || ino >= FS_MAX_INODES) { return (i64)IFIRM_ERR_INVALID_ARG; }
     inode_t *e = ino_at(ino);
     if (e->type != FS_TYPE_FILE) { return (i64)IFIRM_ERR_INVALID_ARG; }
-    if (off + len > FS_MAX_FILE) { return (i64)IFIRM_ERR_NO_SPACE; }
+    if ((u64)off + (u64)len > (u64)FS_MAX_FILE) { return (i64)IFIRM_ERR_NO_SPACE; }
 
     const u8 *src = (const u8 *)buf;
     u32 done = 0;

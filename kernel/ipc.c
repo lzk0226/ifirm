@@ -50,6 +50,14 @@ ifirm_status_t ipc_dequeue(channel_t *ch, u8 *buf, u32 *len)
     return IFIRM_OK;
 }
 
+ifirm_status_t ipc_peek_len(channel_t *ch, u32 *len)
+{
+    if (ch == NULL || len == NULL) { return IFIRM_ERR_INVALID_ARG; }
+    if (ch->count == 0u) { return IFIRM_ERR_AGAIN; }
+    *len = ch->len[ch->head];
+    return IFIRM_OK;
+}
+
 ifirm_status_t ipc_send(channel_t *ch, u8 from_dom, const u8 *msg, u32 len, bool nonblock)
 {
     (void)nonblock;

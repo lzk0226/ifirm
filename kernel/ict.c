@@ -81,6 +81,21 @@ u32 ict_count(u8 dom)
     return n;
 }
 
+void ict_reset(u8 dom)
+{
+    domain_t *d = domain_get(dom);
+    if (d == NULL) { return; }
+    for (u32 i = 0; i < ICT_MAX_ENTRIES; i++) {
+        d->ict[i].function_id = 0u;
+        d->ict[i].target_off = 0u;
+        d->ict[i].flags = 0u;
+        d->ict[i].cap_slot = 0u;
+        d->ict[i].arg_limit = 0u;
+        g_slot_cap[dom][i] = 0u;
+        g_slot_dead[dom][i] = 0u;
+    }
+}
+
 i64 ict_dispatch(trap_frame_t *f, u32 slot)
 {
     domain_t *d = g_current_domain;

@@ -62,7 +62,7 @@ i64 ca_delegate(trap_frame_t *f);    /* syscall 13：把句柄派生给另一个
 
 /* 队列：入队 → 时钟中断里批量处理 → 申请者轮询取结果 */
 i64 ca_enqueue(u8 dom, u8 type, u16 rights, u32 object_id, u8 phase);
-i64 ca_queue_poll(u32 ticket, cap_t *out);   /* 0 完成 / -AGAIN 未处理 */
+i64 ca_queue_poll(u8 dom, u32 ticket, cap_t *out); /* 0 完成 / -AGAIN 未处理 / 票号不属于该域 -DENIED */
 u32 ca_drain(void);                          /* 处理所有待决项，返回条数 */
 u32 ca_queue_depth(void);
 i64 ca_queue_selftest(void);                 /* 启动期自检：满、背压、批量 */

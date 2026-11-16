@@ -55,19 +55,44 @@ static ifirm_status_t put_user(u64 *root, vaddr_t va, const void *src, u64 len)
     return IFIRM_OK;
 }
 
+/*
+ * 把一个域槽彻底恢复成 FREE：地址空间、能力表、ICT、计数、名字一起清。
+ * spawn 失败与域回收必须走同一条路径——只把 state 改回 FREE 而留下
+ * caps/ict，域号复用时会继承上一代的句柄和槽（ca/cap 都以为还占着）。
+ */
+static void spawn_reset(u16 id)
+{
+    domain_t *d = &g_domains[id];
+    if (d->root != NULL) { vmm_release(d->root); d->root = NULL; }
+
+    for (u32 i = 1u; i < 256u; i++) {
+        cap_entry_t *e = &d->caps[i];
+        e->flags = 0u;
+        e->gen_owner = 0u;
+        e->rights = 0u;
+        e->object_id = 0u;
+        e->object_type = 0u;
+        e->derived_from = 0u;
+    }
+    ict_reset((u8)id);
+
+    d->state = DOMAIN_FREE;
+    d->thread_count = 0u;
+    d->mem_pages = 0u;
+    d->mem_used = 0u;
+    d->cap_used = 0u;
+    d->faults = 0u;
+    d->tpl_id = 0u;
+    d->name = NULL;
+}
+
 void domain_reap(void)
 {
     for (u16 i = 0; i < MAX_DOMAINS; i++) {
-        domain_t *d = &g_domains[i];
-        if (d->state != DOMAIN_DEAD) { continue; }
+        if (g_domains[i].state != DOMAIN_DEAD) { continue; }
         thread_t *t = thread_of_domain((u8)i);
         if (t != NULL) { t->state = THREAD_FREE; t->wait_obj = 0u; }
-        if (d->root != NULL) { vmm_release(d->root); d->root = NULL; }
-        d->state = DOMAIN_FREE;
-        d->thread_count = 0u;
-        d->mem_pages = 0u;
-        d->cap_used = 0u;
-        d->name = NULL;
+        spawn_reset(i);
     }
 }
 
@@ -136,31 +161,31 @@ ifirm_status_t domain_spawn_path(const char *path, u32 argc, const char *const *
     d->name = g_names[id];
 
     d->root = vmm_new_as();
-    if (d->root == NULL) { return IFIRM_ERR_NO_MEMORY; }
+    if (d->root == NULL) { spawn_reset(id); return IFIRM_ERR_NO_MEMORY; }
 
     st = elf_load(d->root, g_elf, len, info);
-    if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+    if (st != IFIRM_OK) { spawn_reset(id); return st; }
     d->mem_pages = (u16)info->pages;
 
     /* console 能力只能由 CA 发；charter 的 dom=0 规则覆盖全部派生域 */
     /* 一个句柄同时带 READ|WRITE：ICT 槽要 WRITE，读键盘要 READ */
     cap_t con = 0u;
     st = ca_authorize(id, OBJ_DEVICE, (u16)(CAP_RIGHT_READ | CAP_RIGHT_WRITE), 1u, CA_BOOT, &con);
-    if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+    if (st != IFIRM_OK) { spawn_reset(id); return st; }
 
     st = ict_install(id, 8u, (u16)((u32)con & CAP_IDX_MASK), ICT_F_NEEDS_CAP, 0u);
-    if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+    if (st != IFIRM_OK) { spawn_reset(id); return st; }
 
     u64 ict_pa = 0u;
     st = map_zero(d->root, DOMAIN_ICT_VA, PTE_R | PTE_X | PTE_U, &ict_pa);
-    if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+    if (st != IFIRM_OK) { spawn_reset(id); return st; }
     ict_build_page(id, (u8 *)ict_pa);
     d->mem_pages++;
 
     for (u32 i = 0; i < 4u; i++) {
         st = map_zero(d->root, DOMAIN_USTACK_BASE + (u64)i * PAGE_SIZE,
                       PTE_R | PTE_W | PTE_U, NULL);
-        if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+        if (st != IFIRM_OK) { spawn_reset(id); return st; }
         d->mem_pages++;
     }
 
@@ -170,13 +195,42 @@ ifirm_status_t domain_spawn_path(const char *path, u32 argc, const char *const *
     u64 a1 = 0u;
     if (argc > 0u && argv != NULL) {
         st = push_args(d->root, stack_top, argc, argv, &sp, &a0, &a1);
-        if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+        if (st != IFIRM_OK) { spawn_reset(id); return st; }
     }
 
     thread_t *t = thread_create((u8)id, info->entry, a0, a1, (u64)con, sp);
-    if (t == NULL) { vmm_release(d->root); d->root = NULL; return IFIRM_ERR_NO_SPACE; }
+    if (t == NULL) { spawn_reset(id); return IFIRM_ERR_NO_SPACE; }
     d->thread_count = 1u;
 
     if (out_id != NULL) { *out_id = id; }
     return IFIRM_OK;
+}
+
+/* 启动期自检：回收一个 DEAD 域后，它的 cap 表与 ICT 槽必须一起消失 */
+i64 spawn_reap_selftest(void)
+{
+    u16 id = (u16)(MAX_DOMAINS - 1u);
+    domain_t *d = &g_domains[id];
+    if (d->state != DOMAIN_FREE || d->root != NULL || d->cap_used != 0u) {
+        return IFIRM_ERR_INVALID_STATE;
+    }
+
+    d->id = id;
+    d->state = DOMAIN_READY;
+    cap_t h = 0u;
+    ifirm_status_t st = cap_grant(id, OBJ_DEVICE, 1u, CAP_RIGHT_WRITE, &h);
+    if (st != IFIRM_OK) { d->state = DOMAIN_FREE; return st; }
+    u32 idx = (u32)h & CAP_IDX_MASK;
+    st = ict_install((u8)id, 8u, (u16)idx, ICT_F_NEEDS_CAP, 0u);
+    if (st != IFIRM_OK) { d->state = DOMAIN_FREE; return st; }
+
+    d->state = DOMAIN_DEAD;
+    domain_reap();
+
+    bool ok = (d->state == DOMAIN_FREE) && (d->root == NULL) &&
+              (d->cap_used == 0u) && (ict_count((u8)id) == 0u) &&
+              ((d->caps[idx].flags & CAP_FLAG_VALID) == 0u);
+    printk("IFIRM-REAP selftest=%s caps_used=%u ict=%u\n",
+           ok ? "ok" : "fail", (u32)d->cap_used, (u32)ict_count((u8)id));
+    return ok ? IFIRM_OK : IFIRM_ERR_INVALID_STATE;
 }

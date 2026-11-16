@@ -30,10 +30,13 @@ u64 now_ms(void) { return now_ns() / 1000000ull; }
 static bool user_range_ok(u64 *root, vaddr_t va, u64 len)
 {
     if (len == 0u) { return true; }
-    if (va + len < va) { return false; }
-    for (u64 off = 0; off < len; off += PAGE_SIZE) {
-        u64 e = vmm_walk_pte(root, va + off);
+    u64 last_byte = va + len - 1u;
+    if (last_byte < va) { return false; }         /* 长度本身回绕 */
+    u64 last_page = last_byte & ~0xFFFull;
+    for (u64 page = va & ~0xFFFull; ; page += PAGE_SIZE) {
+        u64 e = vmm_walk_pte(root, page);
         if ((e & PTE_V) == 0u || (e & PTE_U) == 0u) { return false; }
+        if (page >= last_page) { break; }
     }
     return true;
 }
@@ -45,7 +48,11 @@ static ifirm_status_t xcopy(u64 *root, vaddr_t va, void *buf, u64 len, bool to_u
     u64 done = 0;
     while (done < len) {
         vaddr_t cur = va + done;
-        u64 pa = vmm_walk(root, cur);       /* 已含页内偏移 */
+        u64 pte = vmm_walk_pte(root, cur);
+        if ((pte & PTE_V) == 0u || (pte & PTE_U) == 0u) {
+            return IFIRM_ERR_INVALID_ARG;   /* 每块都验：恒等映射/空页不能当用户页 */
+        }
+        u64 pa = ((pte >> 10) << 12) | (cur & 0xFFFull);
         u64 chunk = PAGE_SIZE - (cur & 0xFFFull);
         if (chunk > len - done) { chunk = len - done; }
         u8 *k = (u8 *)pa;
@@ -68,8 +75,7 @@ static i64 read_user_str(u64 *root, u64 va, char *buf, u32 cap)
         buf[i] = c;
         if (c == '\0') { return (i64)i; }
     }
-    buf[cap - 1u] = '\0';
-    return (i64)(cap - 1u);
+    return (i64)IFIRM_ERR_INVALID_ARG;     /* 超长且没有 NUL：不能静默截断 */
 }
 
 static ifirm_status_t get_path(trap_frame_t *f, u8 reg, u8 len_reg, char *buf)
@@ -98,14 +104,17 @@ static void try_deliver(channel_t *ch)
 {
     thread_t *t = thread_waiting_on((u64)ch);
     if (t == NULL) { return; }
+    u32 peek = 0u;
+    if (ipc_peek_len(ch, &peek) != IFIRM_OK) { return; }
+    if (peek > t->blk_cap) {
+        /* 缓冲不够：消息留在队列里，接收者拿到 OVERFLOW 后可用更大的缓冲重试 */
+        thread_wake(t, (i64)IFIRM_ERR_OVERFLOW, 0u);
+        return;
+    }
     u8 msg[IPC_MSG_SIZE];
     u32 len = 0;
     if (ipc_dequeue(ch, msg, &len) != IFIRM_OK) { return; }
     domain_t *d = domain_get(t->dom);
-    if (len > t->blk_cap) {
-        thread_wake(t, (i64)IFIRM_ERR_OVERFLOW, 0u);
-        return;
-    }
     ifirm_status_t st = IFIRM_ERR_BAD_HANDLE;
     if (d != NULL) { st = xcopy(d->root, t->blk_buf, msg, len, true); }
     thread_wake(t, (st == IFIRM_OK) ? 0 : (i64)st, len);
@@ -160,7 +169,8 @@ static i64 do_ipc_recv(trap_frame_t *f)
     if (cap > IPC_MSG_SIZE) { cap = IPC_MSG_SIZE; }
     u8 msg[IPC_MSG_SIZE];
     u32 len = 0;
-    st = ipc_recv(ch, g_current_domain->id, msg, sizeof(msg), &len);
+    /* 用调用者的真实 cap 判断：太小的消息必须留在队列里，不能取出来再丢 */
+    st = ipc_recv(ch, g_current_domain->id, msg, cap, &len);
     if (st == IFIRM_ERR_AGAIN) {
         if (((u32)f->x[REG_A3] & 1u) != 0u) { return (i64)IFIRM_ERR_AGAIN; }
         g_current->blk_buf = f->x[REG_A1];
@@ -190,13 +200,16 @@ static i64 do_ipc_reply(trap_frame_t *f)
     if (st != IFIRM_OK) { return (i64)st; }
 
     domain_t *cd = domain_get(ch->caller_dom);
+    ifirm_status_t dst = IFIRM_ERR_NOT_FOUND;
     if (cd != NULL) {
-        st = xcopy(cd->root, (vaddr_t)ch->caller_va, msg, len, true);
-        if (st != IFIRM_OK) { ch->call_pending = 0u; return (i64)st; }
+        dst = xcopy(cd->root, (vaddr_t)ch->caller_va, msg, len, true);
     }
     ch->call_pending = 0u;
-    thread_wake(&g_threads[ch->caller_tid], 0, len);
-    return 0;
+    /* 回复失败也必须唤醒调用者：否则它会永远阻塞在一次已经结束的调用上 */
+    thread_wake(&g_threads[ch->caller_tid],
+                (dst == IFIRM_OK) ? 0 : (i64)dst,
+                (dst == IFIRM_OK) ? (i64)len : 0);
+    return (dst == IFIRM_OK) ? 0 : (i64)dst;
 }
 
 static i64 do_domain_info(trap_frame_t *f)
@@ -412,7 +425,8 @@ static i64 do_fs_readdir(trap_frame_t *f)
 {
     fs_dirent_t e;
     i64 r = fs_readdir((u32)f->x[REG_A0], (u32)f->x[REG_A1], &e);
-    if (r < 0) { return 0; }         /* 目录读完：返回 0 = 结束 */
+    if (r == (i64)IFIRM_ERR_NOT_FOUND) { return 0; }   /* 目录读完：返回 0 = 结束 */
+    if (r < 0) { return r; }                           /* 真错误照实上报 */
     ifirm_status_t st = xcopy(g_current_domain->root, (vaddr_t)f->x[REG_A2], &e,
                               sizeof(e), true);
     if (st != IFIRM_OK) { return (i64)st; }
@@ -437,7 +451,7 @@ static i64 do_cap_poll(trap_frame_t *f)
 {
     if (g_current_domain == NULL) { return (i64)IFIRM_ERR_INVALID_STATE; }
     cap_t h = 0u;
-    i64 st = ca_queue_poll((u32)f->x[REG_A0], &h);
+    i64 st = ca_queue_poll(g_current_domain->id, (u32)f->x[REG_A0], &h);
     if (st == 0) {
         ifirm_status_t cs = xcopy(g_current_domain->root, (vaddr_t)f->x[REG_A1],
                                   &h, sizeof(h), true);

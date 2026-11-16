@@ -29,5 +29,7 @@ u32            ict_count(u8 dom);
 /* 撤销传播：把引用该 cap_slot 的槽全部标记失效，返回受影响的槽数 */
 u32            ict_revoke_cap(u8 dom, u16 cap_slot);
 void           ict_build_page(u8 dom, u8 *page);
+/* 域槽回收：清空该域的全部 ICT 槽与影子表（槽不能跨代次继承） */
+void           ict_reset(u8 dom);
 
 #endif /* IFIRM_ICT_H */

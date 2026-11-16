@@ -230,25 +230,68 @@ static inline void cputhex(u64 v)
     while (k > 0) { cwrite(&tmp[--k], 1); }
 }
 
+/* 行缓冲 printf：整行拼好再一次写出。逐字符 cwrite 会让两个域的 */
+/* 输出在串口上交错成乱码，而且一行要几十次系统调用。 */
+typedef struct { char b[160]; u64 n; } cbuf_t;
+
+static inline void cb_ch(cbuf_t *c, char ch)
+{
+    if (c->n == (u64)sizeof(c->b)) { cwrite(c->b, c->n); c->n = 0u; }
+    c->b[c->n++] = ch;
+}
+
+static inline void cb_str(cbuf_t *c, const char *s)
+{
+    while (*s != '\0') { cb_ch(c, *s); s++; }
+}
+
+static inline void cb_u64(cbuf_t *c, u64 v)
+{
+    char t[24];
+    int k = 0;
+    if (v == 0u) { t[k++] = '0'; }
+    while (v != 0u && k < 24) { t[k++] = (char)('0' + (int)(v % 10u)); v /= 10u; }
+    while (k > 0) { cb_ch(c, t[--k]); }
+}
+
+static inline void cb_hex(cbuf_t *c, u64 v)
+{
+    const char *d = "0123456789abcdef";
+    char t[16];
+    int k = 0;
+    cb_str(c, "0x");
+    if (v == 0u) { cb_ch(c, '0'); return; }
+    while (v != 0u && k < 16) { t[k++] = d[v & 0xFu]; v >>= 4; }
+    while (k > 0) { cb_ch(c, t[--k]); }
+}
+
 /* 极简 printf：%s %d %u %x %c %% */
 static inline void cprintf(const char *fmt, ...)
 {
+    cbuf_t c;
+    c.n = 0u;
     __builtin_va_list ap;
     __builtin_va_start(ap, fmt);
     for (const char *p = fmt; *p != '\0'; p++) {
-        if (*p != '%') { cwrite(p, 1); continue; }
+        if (*p != '%') { cb_ch(&c, *p); continue; }
         p++;
         switch (*p) {
-        case 's': cputs(__builtin_va_arg(ap, const char *)); break;
-        case 'd': cputi(__builtin_va_arg(ap, i64)); break;
-        case 'u': cputu(__builtin_va_arg(ap, u64)); break;
-        case 'x': cputhex(__builtin_va_arg(ap, u64)); break;
-        case 'c': { char c = (char)__builtin_va_arg(ap, int); cwrite(&c, 1); } break;
-        case '%': cwrite("%", 1); break;
-        default:  cwrite("%", 1); cwrite(p, 1); break;
+        case 's': cb_str(&c, __builtin_va_arg(ap, const char *)); break;
+        case 'd': {
+            i64 v = __builtin_va_arg(ap, i64);
+            if (v < 0) { cb_ch(&c, '-'); cb_u64(&c, (u64)(-v)); }
+            else { cb_u64(&c, (u64)v); }
+            break;
+        }
+        case 'u': cb_u64(&c, __builtin_va_arg(ap, u64)); break;
+        case 'x': cb_hex(&c, __builtin_va_arg(ap, u64)); break;
+        case 'c': { char ch = (char)__builtin_va_arg(ap, int); cb_ch(&c, ch); } break;
+        case '%': cb_ch(&c, '%'); break;
+        default:  cb_ch(&c, '%'); cb_ch(&c, *p); break;
         }
     }
     __builtin_va_end(ap);
+    if (c.n > 0u) { cwrite(c.b, c.n); }
 }
 
 /* ---------- 控制台输入（非阻塞 + 让出） ---------- */

@@ -28,7 +28,7 @@ OBJS := build/start.o build/uart.o build/sbi.o build/trap.o build/trapc.o \
 TPL_NAMES := tpl_producer tpl_consumer tpl_faulty
 TPL_IMGS  := $(addprefix build/,$(addsuffix .img,$(TPL_NAMES)))
 
-PROGS := sh ls cat echo hello ping crash
+PROGS := sh ls cat echo hello ping crash bugcheck
 PROG_ELFS := $(addprefix build/prog_,$(addsuffix .elf,$(PROGS)))
 
 all: build/ifirm.elf build/disk.img
@@ -121,6 +121,7 @@ test: build/ifirm.elf build/disk.img
 	bash tests/ac003.sh
 	bash tests/ac004.sh
 	bash tests/ac005.sh
+	bash tests/ac006.sh
 
 clean:
 	rm -rf build
