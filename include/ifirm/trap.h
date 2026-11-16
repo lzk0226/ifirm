@@ -2,6 +2,7 @@
 #define IFIRM_TRAP_H
 
 #include <ifirm/types.h>
+#include <ifirm/thread.h>   /* trap_frame_t 的定义在 thread.h（§12.3） */
 
 void trap_init(void);
 void timer_arm(void);

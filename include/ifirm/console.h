@@ -4,6 +4,8 @@
 #include <ifirm/types.h>
 
 void uart_init(void);
+bool uart_rx_ready(void);
+char uart_getc(void);
 void uart_putc(char c);
 void puts_raw(const char *s);
 void printk(const char *fmt, ...);

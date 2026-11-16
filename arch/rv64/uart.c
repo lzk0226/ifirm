@@ -3,10 +3,12 @@
 
 #define UART0_BASE 0x10000000u
 #define UART_THR 0x00u
+#define UART_RBR 0x00u
 #define UART_IER 0x01u
 #define UART_FCR 0x02u
 #define UART_LCR 0x03u
 #define UART_LSR 0x05u
+#define LSR_DR   0x01u
 #define LSR_THRE 0x20u
 
 static inline void wr8(u64 addr, u8 v) { *(volatile u8 *)addr = v; }
@@ -25,6 +27,16 @@ void uart_putc(char c)
         /* 等发送保持寄存器空 */
     }
     wr8(UART0_BASE + UART_THR, (u8)c);
+}
+
+bool uart_rx_ready(void)
+{
+    return (rd8(UART0_BASE + UART_LSR) & LSR_DR) != 0u;
+}
+
+char uart_getc(void)
+{
+    return (char)rd8(UART0_BASE + UART_RBR);
 }
 
 void puts_raw(const char *s)

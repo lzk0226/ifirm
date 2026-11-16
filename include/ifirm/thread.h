@@ -45,6 +45,9 @@ typedef struct {
     u32  exit_code;
 } thread_t;
 
+/* wait_obj 的域退出标签：0x1_0000_0000 | 域号，区分通道句柄与域号 */
+#define THREAD_WAIT_DOMAIN 0x100000000ull
+
 #define MAX_THREADS 8
 
 extern thread_t g_threads[MAX_THREADS];
@@ -58,5 +61,7 @@ void      thread_wake(thread_t *t, i64 a0, u64 a1);
 void      thread_exit(i64 code);
 thread_t *thread_of_domain(u8 dom);
 thread_t *thread_waiting_on(u64 obj);
+thread_t *thread_by_id(u16 id);
+void      thread_wake_domain(u8 dom, i64 code);
 
 #endif /* IFIRM_THREAD_H */

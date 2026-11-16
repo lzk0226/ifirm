@@ -188,12 +188,13 @@ ifirm_status_t virtio_blk_init(void)
     return IFIRM_OK;
 }
 
-ifirm_status_t virtio_blk_read(u64 lba, u32 count, void *dst)
+/* type: 0 = VIRTIO_BLK_T_IN（读），1 = VIRTIO_BLK_T_OUT（写） */
+static ifirm_status_t blk_xfer(u32 type, u64 lba, u32 count, void *buf)
 {
     if (g_mmio == NULL) { return IFIRM_ERR_NOT_READY; }
     if (count == 0u) { return IFIRM_OK; }
 
-    g_req.type = 0u;             /* VIRTIO_BLK_T_IN */
+    g_req.type = type;
     g_req.reserved = 0u;
     g_req.sector = lba;
     g_status_byte = 0xffu;
@@ -203,9 +204,10 @@ ifirm_status_t virtio_blk_read(u64 lba, u32 count, void *dst)
     g_desc[0].flags = VQ_DESC_NEXT;
     g_desc[0].next = 1u;
 
-    g_desc[1].addr = (u64)dst;
+    g_desc[1].addr = (u64)buf;
     g_desc[1].len = count * 512u;
-    g_desc[1].flags = VQ_DESC_NEXT | VQ_DESC_WRITE;   /* 设备要往这里写数据 */
+    /* 读：设备写这块内存；写：设备从这块内存读，不能带 WRITE */
+    g_desc[1].flags = VQ_DESC_NEXT | ((type == 0u) ? VQ_DESC_WRITE : 0u);
     g_desc[1].next = 2u;
 
     g_desc[2].addr = (u64)&g_status_byte;
@@ -228,4 +230,14 @@ ifirm_status_t virtio_blk_read(u64 lba, u32 count, void *dst)
     if (rd(R_INT_STATUS) != 0u) { wr(R_INT_ACK, rd(R_INT_STATUS)); }
 
     return (g_status_byte == 0u) ? IFIRM_OK : IFIRM_ERR_CORRUPT;
+}
+
+ifirm_status_t virtio_blk_read(u64 lba, u32 count, void *dst)
+{
+    return blk_xfer(0u, lba, count, dst);
+}
+
+ifirm_status_t virtio_blk_write(u64 lba, u32 count, const void *src)
+{
+    return blk_xfer(1u, lba, count, (void *)src);
 }

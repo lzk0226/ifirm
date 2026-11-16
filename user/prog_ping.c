@@ -1,20 +1,19 @@
 #include "ulib.h"
 
-/* 第二个磁盘程序：只证明内核按名字从文件系统里取程序，没有给 hello 写死。 */
-void _start(u64 chan, u64 con, u64 inst)
+/* ping [次数]：用 CLOCK 计时，演示"程序自己决定跑多久" */
+static int umain(int argc, char **argv)
 {
-    (void)chan; (void)con; (void)inst;
-    line_t l;
-    l.n = 0;
-    l_tag(&l, "ping", 7);
-    l_str(&l, "alive from disk (elf)");
-    l_flush(&l);
-
-    l_tag(&l, "ping", 7);
-    l_str(&l, "sum 1..10=");
-    l_i64(&l, (i64)(1+2+3+4+5+6+7+8+9+10));
-    l_flush(&l);
-
-    (void)sys5(SYS_EXIT, 0, 0, 0, 0, 0);
-    for (;;) { }
+    int n = (argc > 1) ? atoi10(argv[1]) : 3;
+    if (n <= 0 || n > 20) { n = 3; }
+    u64 t0 = now_ms();
+    for (int i = 0; i < n; i++) {
+        u64 t = now_ms() - t0;
+        cprintf("ping: seq=%d t=%dms\n", (i64)i, (i64)t);
+        u64 until = now_ms() + 20u;
+        while (now_ms() < until) { (void)sys5(SYS_YIELD, 0, 0, 0, 0, 0); }
+    }
+    cprintf("ping: %d packets, %dms total\n", (i64)n, (i64)(now_ms() - t0));
+    return 0;
 }
+
+USER_MAIN(umain)

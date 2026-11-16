@@ -1,70 +1,91 @@
-/* 宿主工具：把 tpl_*.text.bin / tpl_*.data.bin 包成带摘要头的模板镜像（不进内核） */
+/* mkimg：把 .text/.data 载荷包成 v2 原子模板镜像（宿主工具，不进内核） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
-#define HDR 40u
+#define HDR 64u
+#define NAME_LEN 16u
 
-static unsigned long long fnv1a64(const unsigned char *p, size_t n, unsigned long long h)
+static uint64_t fnv64(const unsigned char *p, size_t n)
 {
-    for (size_t i = 0; i < n; i++) { h ^= (unsigned long long)p[i]; h *= 0x100000001b3ull; }
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ull; }
     return h;
 }
 
-static unsigned long long name_hash(const char *s)
+static uint32_t fnv32(const char *s)
 {
-    unsigned long long h = 0x811c9dc5ull;
-    while (*s != '\0') { h ^= (unsigned long long)(unsigned char)*s++; h *= 0x01000193ull; }
-    return h & 0xFFFFFFFFull;
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; s[i] != '\0' && i < NAME_LEN; i++) { h ^= (unsigned char)s[i]; h *= 16777619u; }
+    return h;
 }
 
-static unsigned char *slurp(const char *path, long *out_n)
+static unsigned char *slurp(const char *path, size_t *out, int allow_empty)
 {
     FILE *f = fopen(path, "rb");
-    if (f == NULL) { perror(path); exit(1); }
+    if (f == NULL) {
+        if (allow_empty) { *out = 0; return calloc(1, 1); }
+        perror(path);
+        exit(1);
+    }
     fseek(f, 0, SEEK_END);
     long n = ftell(f);
     fseek(f, 0, SEEK_SET);
-    unsigned char *buf = (unsigned char *)calloc(1, (size_t)(n > 0 ? n : 1));
-    if (buf == NULL) { fprintf(stderr, "oom\n"); exit(1); }
-    if (n > 0 && fread(buf, 1, (size_t)n, f) != (size_t)n) { fprintf(stderr, "short read\n"); exit(1); }
+    if (n < 0) { exit(1); }
+    unsigned char *b = malloc((size_t)n + 1u);
+    if (n > 0 && fread(b, 1, (size_t)n, f) != (size_t)n) { exit(1); }
     fclose(f);
-    *out_n = n;
-    return buf;
+    *out = (size_t)n;
+    return b;
 }
 
 int main(int argc, char **argv)
 {
-    if (argc != 5) { fprintf(stderr, "usage: mkimg <name> <text.bin> <data.bin> <out.img>\n"); return 2; }
+    if (argc != 6) {
+        fprintf(stderr, "usage: mkimg <name> <text.bin> <data.bin> <out.img> <services-hex>\n");
+        return 2;
+    }
     const char *name = argv[1];
-    long tn = 0, dn = 0;
-    unsigned char *tb = slurp(argv[2], &tn);
-    unsigned char *db = slurp(argv[3], &dn);
-    if (tn <= 0 || tn > 65536) { fprintf(stderr, "bad text size %ld\n", tn); return 1; }
-    if (dn < 0 || dn > 65536) { fprintf(stderr, "bad data size %ld\n", dn); return 1; }
+    if (strlen(name) >= NAME_LEN) { fprintf(stderr, "name too long\n"); return 2; }
 
-    unsigned char h[HDR];
-    memset(h, 0, sizeof(h));
-    memcpy(h, "IFIRMTPL", 8);
-    h[8] = 1; h[9] = 0;
-    h[10] = HDR; h[11] = 0;
-    uint32_t tl = (uint32_t)tn, dl = (uint32_t)dn;
-    memcpy(h + 12, &tl, 4);
-    memcpy(h + 16, &dl, 4);
-    uint32_t nh = (uint32_t)name_hash(name);
-    memcpy(h + 20, &nh, 4);
-    unsigned long long d = 0xcbf29ce484222325ull;
-    d = fnv1a64(tb, (size_t)tn, d);
-    d = fnv1a64(db, (size_t)dn, d);
-    memcpy(h + 24, &d, 8);
+    size_t tn = 0, dn = 0;
+    unsigned char *tb = slurp(argv[2], &tn, 0);
+    unsigned char *db = slurp(argv[3], &dn, 1);
+    unsigned long svc = strtoul(argv[5], NULL, 0);
 
-    FILE *out = fopen(argv[4], "wb");
-    if (out == NULL) { perror(argv[4]); return 1; }
-    fwrite(h, 1, sizeof(h), out);
-    fwrite(tb, 1, (size_t)tn, out);
-    fwrite(db, 1, (size_t)dn, out);
-    fclose(out);
-    printf("%s: text=%ld data=%ld digest=0x%llx\n", name, tn, dn, d);
+    unsigned char hdr[HDR];
+    memset(hdr, 0, sizeof hdr);
+    memcpy(hdr, "IFIRMTPL", 8);
+    uint16_t ver = 2, hs = HDR;
+    memcpy(hdr + 8, &ver, 2);
+    memcpy(hdr + 10, &hs, 2);
+    uint32_t tl = (uint32_t)tn, dl = (uint32_t)dn, nh = fnv32(name);
+    memcpy(hdr + 12, &tl, 4);
+    memcpy(hdr + 16, &dl, 4);
+    memcpy(hdr + 20, &nh, 4);
+    memcpy(hdr + 32, name, strlen(name));
+
+    unsigned char *payload = malloc((size_t)tl + dl + 1u);
+    if (tl) { memcpy(payload, tb, tl); }
+    if (dl) { memcpy(payload + tl, db, dl); }
+    uint64_t dg = fnv64(payload, (size_t)tl + dl);
+    memcpy(hdr + 24, &dg, 8);
+
+    uint16_t abi = 1, stk = 4;
+    memcpy(hdr + 48, &abi, 2);
+    memcpy(hdr + 50, &stk, 2);
+    uint32_t sv = (uint32_t)svc, fl = 0, rs = 0;
+    memcpy(hdr + 52, &sv, 4);
+    memcpy(hdr + 56, &fl, 4);
+    memcpy(hdr + 60, &rs, 4);
+
+    FILE *o = fopen(argv[4], "wb");
+    if (o == NULL) { perror(argv[4]); return 1; }
+    fwrite(hdr, 1, HDR, o);
+    fwrite(payload, 1, (size_t)tl + dl, o);
+    fclose(o);
+    printf("mkimg: %s name=%s text=%u data=%u svc=0x%x digest=0x%08x%08x\n",
+           argv[4], name, tl, dl, sv, (unsigned)(dg >> 32), (unsigned)dg);
     return 0;
 }

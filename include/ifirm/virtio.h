@@ -12,6 +12,7 @@
 
 ifirm_status_t virtio_blk_init(void);
 ifirm_status_t virtio_blk_read(u64 lba, u32 count, void *dst);
+ifirm_status_t virtio_blk_write(u64 lba, u32 count, const void *src);
 u32            virtio_blk_version(void);
 u64            virtio_blk_capacity(void);
 

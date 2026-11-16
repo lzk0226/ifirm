@@ -1,0 +1,19 @@
+# Ifirm 中央授权控制器的策略文件（charter）
+# 构建期由 tools/mkcharter 打包成二进制镜像，启动期由 CA 解析并校验摘要。
+#
+# 列：dom  type  rights  object  phase
+#   dom    : 域号；0 表示「派生域类」通配（只对运行期 spawn 出来的域 id>=6 生效）
+#   type   : tpl(1) dom(2) mem(3) chan(4) dev(5)
+#   rights : 权限位掩码（十六进制），见 include/ifirm/cap.h
+#   object : 对象号（通道号 / 设备号）
+#   phase  : boot（仅组合期）| run（运行期可申请）
+1  chan 0x28 1 boot
+2  chan 0x50 1 boot
+4  chan 0x28 2 boot
+5  chan 0x50 2 boot
+1  dev  0x02 1 boot
+1  dev  0x02 1 run
+4  dev  0x02 1 run
+# 派生域类（spawn 出来的程序）要能写也能读控制台：READ|WRITE = 0x03
+0  dev  0x03 1 boot
+0  dev  0x03 1 run

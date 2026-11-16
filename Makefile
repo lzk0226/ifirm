@@ -1,4 +1,4 @@
-# Ifirm 第一版内核 —— 单条 make 即得可引导 ELF（§7.7）
+# Ifirm 1.0 —— 单条 make 即得可引导 ELF 与磁盘映像（§7.7）
 CC      := clang
 LD      := ld.lld
 OBJCOPY := riscv64-linux-gnu-objcopy
@@ -21,12 +21,15 @@ LDFLAGS := -nostdlib -fuse-ld=lld -T linker/kernel.ld \
 OBJS := build/start.o build/uart.o build/sbi.o build/trap.o build/trapc.o \
         build/printk.o build/board.o build/pmm.o build/vmm.o build/cap.o \
         build/thread.o build/ict.o build/ipc.o build/domain.o \
-        build/syscall.o build/ca.o build/template.o build/virtio.o build/fs.o \
-        build/elf.o build/spawn.o build/main.o build/libk.o \
-        build/blobs.o
+        build/syscall.o build/ca.o build/template.o build/tplreg.o \
+        build/component.o build/virtio.o build/fs.o build/elf.o \
+        build/spawn.o build/main.o build/libk.o build/blobs.o
 
-TEXTBINS := build/tpl_producer.text.bin build/tpl_consumer.text.bin build/tpl_faulty.text.bin
-TPL_IMGS := build/tpl_producer.img build/tpl_consumer.img build/tpl_faulty.img
+TPL_NAMES := tpl_producer tpl_consumer tpl_faulty
+TPL_IMGS  := $(addprefix build/,$(addsuffix .img,$(TPL_NAMES)))
+
+PROGS := sh ls cat echo hello ping crash
+PROG_ELFS := $(addprefix build/prog_,$(addsuffix .elf,$(PROGS)))
 
 all: build/ifirm.elf build/disk.img
 
@@ -54,7 +57,8 @@ build/%.o: kernel/%.c
 	@mkdir -p build
 	$(CC) $(CFLAGS) -c $< -o $@
 
-build/tpl_%.elf: user/tpl_%.c user/ulib.h user/user.ld
+# ---- 原子模板（编译进内核映像的模板镜像） ----
+build/%.elf: user/%.c user/ulib.h user/user.ld
 	@mkdir -p build
 	$(CC) $(UCFLAGS) -T user/user.ld $< -o $@
 
@@ -64,25 +68,34 @@ build/%.text.bin: build/%.elf
 build/%.data.bin: build/%.elf
 	$(OBJCOPY) -O binary --only-section=.data $< $@
 
-# 模板镜像 = 40 字节头（含摘要）+ 模板 .text（tools/mkimg.c，宿主工具，不进内核）
 build/tools/mkimg: tools/mkimg.c
 	@mkdir -p build/tools
 	$(HOSTCC) -O2 -o $@ $<
 
-build/%.img: build/%.text.bin build/%.data.bin build/tools/mkimg
-	build/tools/mkimg $* $< build/$*.data.bin $@
+# 服务位由模板名决定：producer 用 console+channel，consumer 用 channel+reply
+SVC_tpl_producer := 0x03
+SVC_tpl_consumer := 0x06
+SVC_tpl_faulty   := 0x00
 
-build/blobs.o: $(TPL_IMGS)
-	cd build && riscv64-linux-gnu-ld -r -b binary $(notdir $(TPL_IMGS)) -o blobs.o
+build/%.img: build/%.text.bin build/%.data.bin build/tools/mkimg
+	build/tools/mkimg $(patsubst tpl_%,%,$*) $< build/$*.data.bin $@ $(SVC_$*)
+
+# ---- 中央授权控制器策略（charter 是镜像，不是源码里的 if） ----
+build/tools/mkcharter: tools/mkcharter.c
+	@mkdir -p build/tools
+	$(HOSTCC) -O2 -o $@ $<
+
+build/charter.bin: charter/charter.txt build/tools/mkcharter
+	build/tools/mkcharter $< $@
+
+build/blobs.o: $(TPL_IMGS) build/charter.bin
+	cd build && riscv64-linux-gnu-ld -r -b binary $(notdir $(TPL_IMGS)) charter.bin -o blobs.o
 
 build/ifirm.elf: $(OBJS)
 	$(CC) --target=$(TARGET) $(ARCH) $(LDFLAGS) -o $@ $(OBJS)
 
-build/prog_hello.elf: user/prog_hello.c user/ulib.h user/user.ld
-	@mkdir -p build
-	$(CC) $(UCFLAGS) -T user/user.ld $< -o $@
-
-build/prog_ping.elf: user/prog_ping.c user/ulib.h user/user.ld
+# ---- 磁盘上的程序（不编进内核映像） ----
+build/prog_%.elf: user/prog_%.c user/ulib.h user/user.ld
 	@mkdir -p build
 	$(CC) $(UCFLAGS) -T user/user.ld $< -o $@
 
@@ -90,9 +103,10 @@ build/tools/mkfs: tools/mkfs.c
 	@mkdir -p build/tools
 	$(HOSTCC) -O2 -o $@ $<
 
-# 磁盘映像：外部程序不编进内核，只放在这里
-build/disk.img: build/prog_hello.elf build/prog_ping.elf build/tools/mkfs
-	build/tools/mkfs $@ hello=build/prog_hello.elf ping=build/prog_ping.elf
+DISK_ARGS := $(foreach p,$(PROGS),bin/$(p)=build/prog_$(p).elf)
+
+build/disk.img: $(PROG_ELFS) build/tools/mkfs
+	build/tools/mkfs $@ $(DISK_ARGS)
 
 QEMU := qemu-system-riscv64 -machine virt -m 256M -smp 1 -nographic \
         -bios default -drive file=build/disk.img,format=raw,if=none,id=d0 \
@@ -105,6 +119,7 @@ test: build/ifirm.elf build/disk.img
 	bash tests/ac001.sh
 	bash tests/ac002.sh
 	bash tests/ac003.sh
+	bash tests/ac004.sh
 
 clean:
 	rm -rf build

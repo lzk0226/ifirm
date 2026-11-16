@@ -38,13 +38,16 @@
 #define CAP_FLAG_DELEGABLE     0x02u
 #define CAP_FLAG_KERNEL_PRIVATE 0x04u
 
+/* 派生链的最大深度：超过就拒绝，避免组合爆炸与环 */
+#define CAP_DERIVE_DEPTH 4u
+
 typedef struct {
     u32 object_id;      /*  0 */
     u32 gen_owner;      /*  4: [31:12] 代次 [11:0] 属主域号 */
     u16 rights;         /*  8 */
     u8  object_type;    /* 10 */
     u8  flags;          /* 11 */
-    u32 derived_from;   /* 12 */
+    u32 derived_from;   /* 12: (源域 << 16) | 源索引，0 表示 CA 直接授予 */
 } cap_entry_t;
 
 STATIC_ASSERT(sizeof(cap_entry_t) == 16, "cap entry frozen");
@@ -57,7 +60,12 @@ static inline cap_t cap_make(u16 idx, u32 gen)
 void           cap_init(void);
 ifirm_status_t cap_check(cap_t h, u8 type, u16 rights, cap_entry_t **out);
 ifirm_status_t cap_grant(u16 dom_id, u8 type, u32 object_id, u16 rights, cap_t *out);
+/* 派生：从源域某个句柄派生一个子句柄到目标域，derived_from 记下源 */
+ifirm_status_t cap_delegate(u16 src_dom, u16 src_idx, u16 dst_dom, u16 rights_mask, cap_t *out);
 ifirm_status_t cap_revoke(u16 dom_id, u16 idx);
+/* 撤销并沿派生链传播：返回被失效的句柄总数（含自身） */
+u32            cap_revoke_tree(u16 dom_id, u16 idx);
 u16            cap_count(u16 dom_id);
+u32            cap_total(void);
 
 #endif /* IFIRM_CAP_H */

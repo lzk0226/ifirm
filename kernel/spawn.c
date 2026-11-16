@@ -11,11 +11,13 @@
 #include <ifirm/console.h>
 #include <ifirm/status.h>
 
-#define SPAWN_MAX_ELF (64u * 1024u)
+#define SPAWN_MAX_ELF  (64u * 1024u)
 #define SPAWN_FIRST_ID 6u
+#define SPAWN_ARGS_MAX 8u
+#define SPAWN_ARG_MAX  64u
 
 static u8   g_elf[SPAWN_MAX_ELF];
-static char g_names[FS_MAX_FILES][FS_NAME_LEN];
+static char g_names[MAX_DOMAINS][FS_NAME_LEN];
 
 static void zero_page(u64 pa)
 {
@@ -34,10 +36,78 @@ static ifirm_status_t map_zero(u64 *root, vaddr_t va, u64 perm, u64 *out_pa)
     return IFIRM_OK;
 }
 
-ifirm_status_t domain_spawn_file(const char *name, u16 *out_id, elf_info_t *info)
+/* 往新域的地址空间写字节：页表已建好，逐页取物理地址后直接写 */
+static ifirm_status_t put_user(u64 *root, vaddr_t va, const void *src, u64 len)
 {
+    const u8 *s = (const u8 *)src;
+    u64 done = 0u;
+    while (done < len) {
+        vaddr_t cur = va + done;
+        u64 pte = vmm_walk_pte(root, cur);
+        if ((pte & PTE_V) == 0u || (pte & PTE_U) == 0u) { return IFIRM_ERR_INVALID_ARG; }
+        u64 pa = vmm_walk(root, cur);          /* 已含页内偏移 */
+        u64 chunk = PAGE_SIZE - (cur & 0xFFFull);
+        if (chunk > len - done) { chunk = len - done; }
+        u8 *k = (u8 *)pa;
+        for (u64 i = 0; i < chunk; i++) { k[i] = s[done + i]; }
+        done += chunk;
+    }
+    return IFIRM_OK;
+}
+
+void domain_reap(void)
+{
+    for (u16 i = 0; i < MAX_DOMAINS; i++) {
+        domain_t *d = &g_domains[i];
+        if (d->state != DOMAIN_DEAD) { continue; }
+        thread_t *t = thread_of_domain((u8)i);
+        if (t != NULL) { t->state = THREAD_FREE; t->wait_obj = 0u; }
+        if (d->root != NULL) { vmm_release(d->root); d->root = NULL; }
+        d->state = DOMAIN_FREE;
+        d->thread_count = 0u;
+        d->mem_pages = 0u;
+        d->cap_used = 0u;
+        d->name = NULL;
+    }
+}
+
+/*
+ * 把 argv 拷到新用户栈顶上：字符串从高地址往低放，再放指针数组，
+ * 最后把 sp 指到数组底部（§26.4 参数传递约定）。
+ */
+static ifirm_status_t push_args(u64 *root, u64 stack_top, u32 argc,
+                                const char *const *argv, u64 *out_sp,
+                                u64 *out_argc, u64 *out_argvp)
+{
+    u64 sp = stack_top;
+    u64 ptrs[SPAWN_ARGS_MAX];
+    for (u32 i = 0; i < argc; i++) {
+        u32 n = 0;
+        while (argv[i][n] != '\0' && n + 1u < SPAWN_ARG_MAX) { n++; }
+        n++;                                  /* 含结尾 NUL */
+        sp -= (u64)n;
+        ifirm_status_t st = put_user(root, sp, argv[i], n);
+        if (st != IFIRM_OK) { return st; }
+        ptrs[i] = sp;
+    }
+    u64 arr = (sp - 8ull * (u64)(argc + 1u)) & ~7ull;
+    ptrs[argc] = 0u;
+    ifirm_status_t st = put_user(root, arr, ptrs, 8ull * (u64)(argc + 1u));
+    if (st != IFIRM_OK) { return st; }
+
+    *out_sp = arr;
+    *out_argc = (u64)argc;
+    *out_argvp = arr;
+    return IFIRM_OK;
+}
+
+ifirm_status_t domain_spawn_path(const char *path, u32 argc, const char *const *argv,
+                                 u16 *out_id, elf_info_t *info)
+{
+    if (argc > SPAWN_ARGS_MAX) { return IFIRM_ERR_INVALID_ARG; }
+
     u32 len = 0u;
-    ifirm_status_t st = fs_read(name, g_elf, SPAWN_MAX_ELF, &len);
+    ifirm_status_t st = fs_read_file(path, g_elf, SPAWN_MAX_ELF, &len);
     if (st != IFIRM_OK) { return st; }
 
     st = elf_check(g_elf, len);
@@ -56,10 +126,13 @@ ifirm_status_t domain_spawn_file(const char *name, u16 *out_id, elf_info_t *info
     d->mem_pages = 0u;
     d->faults = 0u;
     d->tpl_id = 0u;
+    d->cap_used = 0u;
 
-    /* 文件名拷到静态区：ELF 缓冲下一轮会被覆盖 */
+    /* 名字拷到静态区：ELF 缓冲下一轮会被覆盖，路径缓冲在调用者栈上 */
+    const char *leaf = path;
+    for (const char *p = path; *p != '\0'; p++) { if (*p == '/') { leaf = p + 1; } }
     for (u32 i = 0; i < FS_NAME_LEN; i++) { g_names[id][i] = '\0'; }
-    for (u32 i = 0; i + 1u < FS_NAME_LEN && name[i] != '\0'; i++) { g_names[id][i] = name[i]; }
+    for (u32 i = 0; i + 1u < FS_NAME_LEN && leaf[i] != '\0'; i++) { g_names[id][i] = leaf[i]; }
     d->name = g_names[id];
 
     d->root = vmm_new_as();
@@ -69,9 +142,10 @@ ifirm_status_t domain_spawn_file(const char *name, u16 *out_id, elf_info_t *info
     if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
     d->mem_pages = (u16)info->pages;
 
-    /* console 能力只能由 CA 发；charter 里 dom=0 的规则覆盖全部派生域 */
+    /* console 能力只能由 CA 发；charter 的 dom=0 规则覆盖全部派生域 */
+    /* 一个句柄同时带 READ|WRITE：ICT 槽要 WRITE，读键盘要 READ */
     cap_t con = 0u;
-    st = ca_authorize(id, OBJ_DEVICE, CAP_RIGHT_WRITE, 1u, CA_BOOT, &con);
+    st = ca_authorize(id, OBJ_DEVICE, (u16)(CAP_RIGHT_READ | CAP_RIGHT_WRITE), 1u, CA_BOOT, &con);
     if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
 
     st = ict_install(id, 8u, (u16)((u32)con & CAP_IDX_MASK), ICT_F_NEEDS_CAP, 0u);
@@ -91,7 +165,15 @@ ifirm_status_t domain_spawn_file(const char *name, u16 *out_id, elf_info_t *info
     }
 
     u64 stack_top = DOMAIN_USTACK_BASE + DOMAIN_USTACK_SIZE;
-    thread_t *t = thread_create((u8)id, info->entry, 0u, (u64)con, 0u, stack_top);
+    u64 sp = stack_top;
+    u64 a0 = 0u;
+    u64 a1 = 0u;
+    if (argc > 0u && argv != NULL) {
+        st = push_args(d->root, stack_top, argc, argv, &sp, &a0, &a1);
+        if (st != IFIRM_OK) { vmm_release(d->root); d->root = NULL; return st; }
+    }
+
+    thread_t *t = thread_create((u8)id, info->entry, a0, a1, (u64)con, sp);
     if (t == NULL) { vmm_release(d->root); d->root = NULL; return IFIRM_ERR_NO_SPACE; }
     d->thread_count = 1u;
 

@@ -1,130 +1,166 @@
-# Ifirm 内核 v3（从磁盘加载并运行外部程序）
+# Ifirm 内核 v4（三要素最小系统 + 可用的用户态）
 
-按 Ifirm1.0.md 实现的 RISC-V 64 微内核。v3 的一句话判据：
-**内核能运行一个不是自己编译进去的程序。**
+按 Ifirm1.0.md 实现的 RISC-V 64 微内核。v4 的判据是用户提的那三个要素必须能跑起来，
+其余一切（网络、图形、SMP、持久化）都不在本版范围内：
 
-v1 是能引导的骨架；v2 把 CA / 模板摘要 / 复合内核从装饰变成可证伪的机制；
-v3 补上了 Linux 0.01 意义上的那一层：磁盘驱动 + 文件系统 + ELF 加载器 + spawn。
-
-## v3 新增：程序来自 virtio-blk，不来自内核映像
-
-四个部件，全部在本仓库内自实现，没有链接任何库：
-
-| 部件 | 位置 | 关键点 |
+| 要素 | v4 的落地方式 | 可以被证伪的地方 |
 |---|---|---|
-| virtio-mmio 块设备 | kernel/virtio.c | 同时支持 legacy（v1）与 modern（v2）两种寄存器语义；8 个 mmio 槽扫描；单请求同步读 |
-| 只读文件系统 | kernel/fs.c + tools/mkfs.c | 8 个扇区头 + 24 字节/条目录 + 512 对齐数据区，最多 32 文件 |
-| ELF64 加载器 | kernel/elf.c | 只认 ET_EXEC / EM_RISCV；按 PT_LOAD 逐页分配、整页填零、按段权限映射（W^X 仍由 vmm_map 强制） |
-| spawn | kernel/spawn.c | 从 id 6 起找空域；建地址空间、铺 2 MiB 模板槽外的用户段、4 页用户栈、装 ICT、经 CA 拿 console 能力、建线程 |
+| 中央授权控制器 CA | 策略不在代码里，而在 charter 镜像里（32 字节头 + 12 字节/条规则）；唯一授权入口 ca_authorize()；派生树 + 树形撤销；256 条审计环；4 个计数器 | 改 charter 一个字节 → 摘要对不上 → IFIRM-COMP FAIL name=ca，一条 IFIRM-DOMAIN 都不出现（ac004） |
+| 复合内核 | 13 个内核原子组件按声明（名字/提供/依赖/层号）组合，内核自己校验层号单调、依赖已被提供，并对每个组件算 FNV-1a32 摘要，最后给出整体 IFIRM-COMPOSE digest | 任一组件缺失或层号错乱 → IFIRM-COMP FAIL name=<组件>，引导在 stage=2 之前停住 |
+| 原子组件 | 用户态模板是带 v2 清单的镜像：magic/版本/ABI/名字/服务位/栈页/摘要；内核侧注册表按名字查表，组合期检查"计划要的能力模板是否声明" | 篡改模板一个字节 → 摘要不符 → IFIRM-COMP FAIL name=tpl，没有 READY（ac002） |
 
-启动输出多出三行：
+外加一条同样重要的判据：**用户态真的能用**。shell、coreutils、可写文件系统、ELF 加载、
+进程创建/等待全部在磁盘上而不是编进内核（ac003 检查 `loaded from disk (elf)` 在内核映像里 0 次、磁盘里 ≥1 次）。
+
+## 启动序列（一次 make run 能看到的）
 
 ~~~text
-IFIRM-FS on files=2 bytes=46080 blk=v1
-IFIRM-EXEC name=hello dom=6 entry=0x10000 segs=2 pages=2
-IFIRM-EXEC name=ping dom=7 entry=0x10000 segs=1 pages=1
-hello[1]: loaded from disk (elf)
-ping[7]: alive from disk (elf)
-hello[1]: tick=150708400
-hello[1]: bye
-~~~
-
-AC-003 把"程序不在内核里"变成两条能失败的断言：
-
-1. 字符串 `loaded from disk (elf)` 在 build/ifirm.elf 里出现 0 次，在 build/disk.img 里出现 ≥1 次；
-2. 把 disk.img 的第一个字节改掉（破坏文件系统 magic），引导必须停 at `IFIRM-BOOT FAIL disk`，且不出现任何 IFIRM-EXEC。
-
-## v2 的三个构想（保持有效）
-
-| 构想 | v1（装饰） | v2/v3（可证伪） |
-|---|---|---|
-| 中央授权控制器 CA | 启动期两次 cap_grant | 唯一授权入口 ca_authorize() + charter 规则表 + 运行期申请 + 撤销传播到 ICT + 四个计数器 |
-| 原子模板 | 裸 .text 拷进一页 | 40 字节头 + FNV-1a64 摘要 + 组合期校验，摘要不符即引导失败 |
-| 复合内核 | 三个域 | 五个域、两个模板各实例化两次；计划表构建期固定，运行时不建域（v3 的 spawn 是这条决策的唯一例外，见"有意省略"） |
-
-## 现在能跑什么
-
-~~~text
-IFIRM-BOOT stage=0 / stage=1
-IFIRM-BOARD model=riscv-virtio,qemu ram=256MiB
+IFIRM-BOOT stage=0
+IFIRM-BOARD model=riscv-virtio,qemu ram=256MiB timebase=10000000 uart=0x10000000 plic=0xc000000
+IFIRM-BOOT stage=1
 IFIRM-MEM total=65536 free=.. used_kernel=.. frag=..
-IFIRM-VM on / IFIRM-TICK hz=100 / IFIRM-CAPS ...
-IFIRM-DOMAIN id=1..5 state=READY name=.. tpl=0x.. ict=.. pages=..
-IFIRM-READY domains=5 pages_used=644
-IFIRM-FS on files=2 bytes=46080 blk=v1
-IFIRM-EXEC name=hello dom=6 ... / IFIRM-EXEC name=ping dom=7 ...
-hello[1]: loaded from disk (elf) / ping[7]: alive from disk (elf)
-producer[1]: ict=ok              经 ICT 槽 0 进内核，槽里带 console 能力
-producer[1]: ca grant st=0       运行期向 CA 申请能力，命中 charter 的 CA_RUNTIME 规则
-producer[1]: revoke con=0        CA 撤销刚发出去的能力
-IFIRM-EVT id=8 dom=1 a=1 b=2     撤销传播：1 个 ICT 槽被标记失效
-producer[1]: ict after revoke=-15
-producer[2]/consumer[1]/consumer[2]: 同一模板的第二实例，走另一条通道
-faulty: ca denied=-5             charter 里没有的对象，CA 拒绝
-IFIRM-EVT id=7 dom=3             faulty 写地址 0，被杀后系统继续
-producer[1]: revoke chan=0 / call after revoke=-15
-IFIRM-CA requests=2 grants=7 denied=1 revokes=2
-IFIRM-HALT all-threads-exited
+IFIRM-VM on / IFIRM-TICK hz=100 / IFIRM-CAPS mmu=1 timer=1 plic=1 uart=1 ...
+IFIRM-COMP n=1 name=board lvl=1 digest=0x..        ← 13 条，内核原子组件
+...
+IFIRM-CA charter=0x9a0b264 rules=9 digest=0x..
+IFIRM-TPL n=1 name=producer ver=2 abi=1 svc=0x3 stack=4 digest=0x..
+IFIRM-TPLSET n=3 ok digest=0x..
+IFIRM-DOMAIN id=1 state=READY name=producer tpl=0x.. tplname=producer ict=1 pages=8
+...（5 个组合域）
+IFIRM-READY domains=5 pages_used=.. t_ms=..
+IFIRM-FS on files=8 bytes=203916 blk=v1 rw=1 free=7769
+IFIRM-INIT name=sh dom=6 entry=0x10000 pages=2
+IFIRM-COMP n=13 name=init lvl=9 digest=0x..
+IFIRM-COMPOSE n=13 ok digest=0x..
+IFIRM-BOOT stage=2
 ~~~
+
+任何一步失败都打 `IFIRM-COMP FAIL name=<组件> st=<状态码>` 或 `IFIRM-BOOT FAIL <原因> (<码>)` 并停机。
+
+## 用户态：从磁盘上的 /bin/sh 开始
+
+启动完成后进入 shell（它自己也是从 virtio-blk 读出来、经 ELF 加载器装进新域的普通程序）：
+
+~~~text
+Ifirm 1.0 minimal system
+type 'help' for commands
+ifirm> ls /
+/:
+  bin             <dir>
+  tmp             <dir>
+  etc             <dir>
+  dev             <dir>
+4 entries
+ifirm> ca
+CA audit (newest first, 13 shown)
+  revoke dom=1 type=4 rights=0x0 obj=1 st=1 t=331ms
+  grant dom=1 type=5 rights=0x2 obj=1 st=0 t=312ms
+  deny  dom=3 type=5 rights=0x400 obj=1 st=-5 t=311ms
+  ...
+ifirm> mkdir /tmp/demo
+ifirm> write /tmp/demo/a.txt hello-ca
+write: /tmp/demo/a.txt 9 bytes
+ifirm> cat /tmp/demo/a.txt
+hello-ca
+ifirm> ps
+PID STATE   KIND PAGES CAPS FAULTS NAME
+6   ready   1     7     1      0      sh
+domains=1
+ifirm> exit
+IFIRM-CA requests=2 grants=11 denied=1 revokes=2
+IFIRM-HALT all-threads-exited blocked=0 t_ms=9760
+~~~
+
+内建命令：`help ps ca mkdir rm write exit`；外部程序在 /bin 里：`sh ls cat echo hello ping crash`，
+由 shell 按名字 spawn，内核从文件系统读 ELF、建地址空间、传 argc/argv、等退出码。
+
+## 文件系统 IFIRMFS2（可写）
+
+| 结构 | 位置 | 说明 |
+|---|---|---|
+| 超级块 | LBA 0（512 B） | magic "IFIRMFS2"、版本 2、inode 数 64、位图 LBA 1 起 2 扇区、inode 表 LBA 5 起 8 扇区、数据 LBA 13、总块数 8192 |
+| 位图 | LBA 1–2 | 1 bit/块，1024 字节覆盖 8192 块 |
+| inode | 64 B × 64 | type/used/nlink/size/parent/blocks[7]/indirect/name[16]/mtime |
+| 数据 | LBA 13 起 | 4 MiB 磁盘；单文件 7 直接块 + 128 间接块 = 67.5 KiB |
+
+读写都是 write-through：改 inode/位图/超级块立即按 512 B 扇区写回，没有日志、没有缓存层。
+目录也是 inode，`fs_readdir` 遍历整张 inode 表按 parent 过滤（64 个 inode 的规模下够用）。
+
+## 系统调用（a7 = 号，a6 非 0 时走 ICT 槽）
+
+```
+1 IPC_SEND   2 IPC_RECV   3 IPC_CALL   4 IPC_REPLY   5 YIELD      6 EXIT
+7 CLOCK      8 DEBUG_WRITE 9 DOMAIN_INFO 10 CONSOLE_WRITE 11 CAP_REQUEST 12 CAP_REVOKE
+13 CAP_DELEGATE 14 CAP_AUDIT 15 SPAWN    16 WAIT         17 CONSOLE_READ
+18 FS_OPEN   19 FS_READ   20 FS_WRITE  21 FS_CLOSE    22 FS_UNLINK
+23 FS_READDIR 24 FS_STAT  25 PROC_LIST 26 FS_MKDIR
+```
+
+返回值约定：a0 = 状态码（0 成功、负数为错误），需要额外结果的调用把值放在 a1
+（例如 SPAWN 回 a1 = 新域号、FS_READ 回 a1 = 实读字节数）。**除约定外的寄存器一律不动**——
+这一条是 v4 的一个真 bug 换来的，见文末。
 
 ## 构建与运行
 
-需要 clang、lld、riscv64-linux-gnu-objcopy / -ld、qemu-system-riscv64（Ubuntu 24.04 的 qemu-system-misc 包），
-宿主另外需要一个 cc 来编译模板打包工具 tools/mkimg.c 与磁盘制作工具 tools/mkfs.c。
+需要 clang、lld、riscv64-linux-gnu-objcopy/-ld、qemu-system-riscv64（Ubuntu 24.04 的 qemu-system-misc），
+宿主另需一个 cc 编译 tools/mkimg.c、tools/mkfs.c 与 tools/mkcharter.c。
 
 ~~~sh
-make          # mkimg → 三个模板镜像 → blobs.o → ifirm.elf；mkfs → disk.img
+make          # mkimg ×3 → blobs.o → ifirm.elf；mkcharter → charter.bin；mkfs → disk.img
 make run      # QEMU 串口输出到当前终端（20 秒自动退出）
-make test     # AC-001（28 项）+ AC-002（3 项）+ AC-003（9 项）
+make test     # AC-001（正向 38 项）+ AC-002/003/004（三个负向）
 ~~~
 
-QEMU 参数固定为 -machine virt -m 256M -smp 1 -nographic -bios default，
-外加 -drive file=build/disk.img,format=raw,if=none,id=d0 -device virtio-blk-device,drive=d0。
-
-## v3 代码落点
-
-1. 块设备：kernel/virtio.c。virtio-mmio 从 0x10001000 起 8 个槽，每槽 0x1000；legacy 用 QueuePFN + 连续两页
-   （desc/avail 在页 0、used 在页 1），modern 用三个独立页 + FEATURES_OK + 接受 VIRTIO_F_VERSION_1；
-   一次读 = 3 个描述符（请求头 / 数据 / 状态字节），同步轮询 used->idx。
-2. 文件系统：tools/mkfs.c（宿主）+ kernel/fs.c（内核）共用一套格式：magic "IFIRMFS1"、u32 版本/文件数/字节数、
-   32 条 24 字节目录、数据从 4096 字节起按 512 对齐。挂载只校验头，不建缓存。
-3. ELF 加载：kernel/elf.c。判据是 PT_LOAD 的 vaddr/filesz/memsz；每页先看目标地址空间里是否已有自己的
-   4 KiB 映射（带 PTE_U 的项才算），否则新分配、整页填零、按 PF_R/W/X 映射。
-4. spawn：kernel/spawn.c。console 能力只能由 CA 发：ca_authorize(id, OBJ_DEVICE, CAP_RIGHT_WRITE, 1u, CA_BOOT, &con)；
-   charter 里 dom=0 的规则表示"派生域类"通配，只对 id>=6 生效。
+QEMU 参数固定：`-machine virt -m 256M -smp 1 -nographic -bios default` +
+`-drive file=build/disk.img,format=raw,if=none,id=d0 -device virtio-blk-device,drive=d0`。
+串口 RX FIFO 只有 16 字节，测试脚本喂命令必须 `sleep` 分批，否则命令在内核启动期间就被丢掉。
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
 | boot/start.S | 入口、清 .bss、跳到 C |
-| arch/rv64/ | UART、SBI、陷阱入口与分发 |
-| kernel/ | 打印、板级、物理内存、Sv39、能力、CA、模板、线程、ICT、IPC、域组合、系统调用、virtio、fs、elf、spawn |
-| include/ifirm/ | 同名头文件（v2 增 template.h/ca.h，v3 增 virtio.h/fs.h/elf.h/spawn.h） |
-| user/ | 用户库、三个模板（producer/consumer/faulty）、两个磁盘程序（prog_hello.c、prog_ping.c） |
-| tools/ | mkimg.c 打包模板镜像；mkfs.c 制作 disk.img。都不进内核 |
-| tests/ | ac001 正向场景、ac002 篡改模板负向、ac003 程序来自磁盘 + 破坏磁盘负向 |
+| arch/rv64/ | UART（含接收）、SBI、陷阱入口与分发 |
+| kernel/component.c | 复合内核：13 个原子组件的声明、层号/依赖校验、组合摘要 |
+| kernel/ca.c | 中央授权控制器：charter 解析、规则匹配、审计环、派生与树形撤销 |
+| kernel/template.c + tplreg.c | 模板 v2 清单校验与注册表 |
+| kernel/cap.c | 能力表、代次、派生链、撤销传播到 ICT |
+| kernel/domain.c / spawn.c | 静态组合五个域 / 从磁盘 spawn 新域（argv 拷到用户栈） |
+| kernel/fs.c + virtio.c + elf.c | IFIRMFS2、virtio-mmio 块设备、ELF64 加载器 |
+| kernel/syscall.c | 26 个系统调用 + 用户指针校验 |
+| user/ | ulib.h + shell + 六个程序 + 三个模板 |
+| tools/ | mkimg（模板打包）、mkfs（磁盘镜像）、mkcharter（策略编译） |
+| tests/ | ac001 正向、ac002 篡改模板、ac003 用 shell 跑完整用户态、ac004 篡改 charter |
 
-## 仍然有意省略（对照手册）
+规模：源码 5,596 行（kernel/arch/user/tools/include/boot），内核映像 text 33,946 + data 8,280 + bss 270,268 字节。
 
-- 无 KIP 页、无 journal/检查点、无模板注册表与组合缓存（CAC/IRC/BBC 仍只打印 cache=C1）。
-- CA 不建内核线程，不实现异步队列与反向引用表；撤销是同步扫影子表。
-- 文件系统只读、无目录、无创建/删除；磁盘程序名写死在 main.c 的两元素表里（"程序来自磁盘"成立，"程序可被任意启动"不成立）。
-- spawn 是"运行期建域"，与 v2 的"静态组合"决策冲突；当前只在引导末尾用一次，CLI 的运行时建域事务仍未实现。
-- 无 PLIC / 设备中断、无 DMA、无 SMP、无持久化；单 hart、单 CA、无抢占式调度。
-- 崩溃只做 domain_fault 打印 + 杀线程，不做域重启。
+## 仍然有意省略
+
+- 无 SMP、无 PLIC/设备中断、无 DMA、无抢占（时间片只在陷阱返回时轮转）、无掉电持久化。
+- 无 KIP 页、无 journal、无模板注册表缓存（CAC/IRC/BBC 只打印 cache=C1）。
+- CA 不建内核线程，没有异步队列；撤销是同步扫表。
+- 文件系统有日志之外的一切简化：无硬链接语义、无权限位、无时间戳更新（mtime 只写一次）。
+- 域崩溃只打印 + 杀线程，不重启；没有真实驱动模型，控制台是唯一设备。
 
 ## 被测试抓到的真 bug（留档）
 
-**v2：模板载荷不完整。** 模板最初只拷 .text，而 -Os 把除以 10 的魔数常量放进了 .data，于是用户态
-所有多位数都打印成 00 / 0? / 0>。根因不是格式化代码，而是模板载荷不完整；修法是镜像里补 .data、
-摘要覆盖 text||data。这条说明能失败的测试比 17 条只会通过的断言有用。
+**v2：模板载荷不完整。** 模板最初只拷 .text，而 -Os 把除法魔数放进 .data，于是用户态所有多位数
+打印成 00 / 0? / 0>。根因不是格式化代码，而是模板载荷不完整；修法是镜像补 .data、摘要覆盖 text||data。
 
-**v3：描述符标志位。** 读盘时数据描述符漏了 VIRTQ_DESC_F_WRITE，设备于是把这 4 KiB 当只读缓冲，
-used.len 只回 1（状态字节），内核读到全零的文件系统头。症状是 `IFIRM-BOOT FAIL disk`，
-但错误码来自"magic 不匹配"，很容易误判成 fs.c 写错。
+**v3：描述符标志位。** 读盘时数据描述符漏了 VIRTQ_DESC_F_WRITE，设备把 4 KiB 当成只读缓冲，
+used.len 只回 1，内核读到全零的文件系统头，症状是 IFIRM-BOOT FAIL disk——很容易误判成 fs.c 写错。
 
-**v3：恒等映射骗过了加载器。** 内核地址空间把 0..1 GiB 恒等映射（给 UART/PLIC/virtio 用），
-ELF 加载器原来用 vmm_walk() 判断"这页是否已映射"，于是把用户 .text 的 0x10000 当成已映射，
-直接往物理地址 0x10000 写（QEMU virt 上那里没有 RAM），触发 store access fault。
-修法：只有带 PTE_U 的 4 KiB 项才算"自己的页"，恒等大页必须被 vmm_map 拆分后覆盖。
+**v3：恒等映射骗过加载器。** 内核把 0..1 GiB 恒等映射给 UART/virtio 用，ELF 加载器原来用 vmm_walk()
+判断"这页是否已映射"，于是把用户 .text 的 0x10000 当成已映射，直接往物理 0x10000 写（QEMU virt 上
+那里没有 RAM）→ store access fault。修法：只有带 PTE_U 的 4 KiB 项才算"自己的页"。
+
+**v4：系统调用回写了调用者的 a2/a3。** SPAWN 为了"顺手"把 entry 和 pages 也放进 a2/a3，
+但用户编译器只被告知 a0/a1 会变，于是 shell 把一个算好的指针（当时的 a3）继续用，
+值变成 1，下一条 `ld a1,0(a3)` 就 load page fault——崩溃发生在 shell，根因在内核的返回约定。
+修法：只回写 a1，其余寄存器原样保留；顺带把 CAP_AUDIT 的计数也改成 a0 返回。
+
+**v4：审计记录结构体对齐。** shell 里把 result 写成 i64，内核是 i32，差 4 字节填充，整张审计表
+错位成乱码（dom=166、type=72）。修法：用户侧 `int result`，并在注释里写死 28 字节的约定。
+
+**v4：console 读的返回约定。** 内核把读到的字节数放 a1、a0 返回 0，但用户库 `cread()` 只看 a0，
+于是 shell 永远认为没输入。修法：直接把字节数放 a0 返回（读 0 字节表示暂时没有输入）。

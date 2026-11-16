@@ -24,7 +24,7 @@ void _start(u64 chan, u64 con, u64 inst)
     if (con != 0u) {
         /* 运行期向 CA 申请能力：只有 charter 里 CA_RUNTIME 的规则能过 */
         i64 h2 = 0;
-        i64 st = sys5_ret1(SYS_CAP_REQUEST, OBJ_DEVICE, CAP_WRITE, 1, &h2);
+        i64 st = sys5_ret1(SYS_CAP_REQUEST, OBJ_DEVICE, CAP_WRITE, 1, (i64)(u64)&h2);
         l_tag(&l, "producer", inst);
         l_str(&l, "ca grant st="); l_i64(&l, st);
         l_str(&l, " cap=");        l_u64(&l, (u64)h2);

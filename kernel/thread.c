@@ -75,11 +75,34 @@ void thread_wake(thread_t *t, i64 a0, u64 a1)
     t->tf.x[REG_A1] = a1;
 }
 
+thread_t *thread_by_id(u16 id)
+{
+    if (id >= MAX_THREADS) { return NULL; }
+    return (g_threads[id].state == THREAD_FREE) ? NULL : &g_threads[id];
+}
+
+/* 唤醒所有等待某个域退出的线程（SYS_WAIT）；域异常终止也走这里 */
+void thread_wake_domain(u8 dom, i64 code)
+{
+    u64 tag = THREAD_WAIT_DOMAIN | (u64)dom;
+    for (u32 i = 0; i < MAX_THREADS; i++) {
+        thread_t *t = &g_threads[i];
+        if (t->state == THREAD_BLOCKED && t->wait_obj == tag) {
+            thread_wake(t, 0, (u64)(u32)code);
+        }
+    }
+}
+
+/* 域退出：标记域 DEAD，并唤醒所有等待这个域的线程（SYS_WAIT） */
 void thread_exit(i64 code)
 {
     if (g_current == NULL) { return; }
     g_current->state = THREAD_DEAD;
     g_current->exit_code = (u32)code;
+
+    domain_t *d = domain_get(g_current->dom);
+    if (d != NULL) { d->state = DOMAIN_DEAD; }
+    thread_wake_domain(g_current->dom, code);
 }
 
 static bool any_blocked(void)
