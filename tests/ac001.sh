@@ -5,7 +5,8 @@ cd "$(dirname "$0")/.."
 LOG=build/serial.log
 mkdir -p build
 timeout 30 qemu-system-riscv64 -machine virt -m 256M -smp 1 -nographic \
-    -bios default -kernel build/ifirm.elf >"$LOG" 2>&1 || true
+    -bios default -drive file=build/disk.img,format=raw,if=none,id=d0 \
+    -device virtio-blk-device,drive=d0 -kernel build/ifirm.elf >"$LOG" 2>&1 || true
 
 fail=0
 need() {

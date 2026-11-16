@@ -28,6 +28,8 @@ static const ca_rule_t g_rules[] = {
     { 1u, OBJ_DEVICE, CA_BOOT, CAP_RIGHT_WRITE,                    1u },
     { 1u, OBJ_DEVICE, CA_RUNTIME, CAP_RIGHT_WRITE,                 1u },
     { 4u, OBJ_DEVICE, CA_RUNTIME, CAP_RIGHT_WRITE,                 1u },
+    /* dom=0 是"派生域类"通配：运行期由 spawn 装配出的域（id>=6）都落在这一条上 */
+    { 0u, OBJ_DEVICE, CA_BOOT,    CAP_RIGHT_WRITE,                 1u },
 };
 
 static u64 g_requests;
@@ -44,7 +46,9 @@ ifirm_status_t ca_authorize(u8 dom, u8 type, u16 rights, u32 object_id, u8 phase
 {
     for (u32 i = 0; i < ARRAY_LEN(g_rules); i++) {
         const ca_rule_t *r = &g_rules[i];
-        if (r->dom != dom || r->type != type || r->object_id != object_id) { continue; }
+        u8 want = (r->dom == 0u) ? dom : r->dom;
+        if (want != dom || r->type != type || r->object_id != object_id) { continue; }
+        if (r->dom == 0u && dom < 6u) { continue; }
         if ((r->rights & rights) != rights) { continue; }
         if (phase == CA_RUNTIME && r->phase != CA_RUNTIME) { continue; }
 

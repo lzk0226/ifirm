@@ -9,6 +9,10 @@
 #include <ifirm/trap.h>
 #include <ifirm/syscall.h>
 #include <ifirm/status.h>
+#include <ifirm/fs.h>
+#include <ifirm/spawn.h>
+#include <ifirm/virtio.h>
+#include <ifirm/elf.h>
 
 extern char _image_end[];
 
@@ -56,6 +60,22 @@ void kmain(u64 hartid, u64 dtb_pa)
 
     printk("IFIRM-READY domains=%u pages_used=%u t_ms=%u\n",
            (u32)domain_count_ready(), (u32)pmm_used(), (u32)now_ms());
+
+    /* 从这里开始，内核不再依赖任何编进映像的用户代码：程序来自磁盘 */
+    ifirm_status_t fst = fs_init();
+    if (fst != IFIRM_OK) { board_halt(fst, "disk"); }
+    printk("IFIRM-FS on files=%u bytes=%u blk=v%u\n",
+           (u32)fs_count(), (u32)fs_bytes(), (u32)virtio_blk_version());
+
+    static const char *const k_progs[] = { "hello", "ping" };
+    for (u32 i = 0; i < 2u; i++) {
+        elf_info_t ei;
+        u16 sid = 0u;
+        ifirm_status_t est = domain_spawn_file(k_progs[i], &sid, &ei);
+        if (est != IFIRM_OK) { board_halt(est, "exec"); }
+        printk("IFIRM-EXEC name=%s dom=%u entry=0x%x segs=%u pages=%u\n",
+               k_progs[i], (u32)sid, (u32)ei.entry, (u32)ei.segs, (u32)ei.pages);
+    }
 
     timer_enable();
     sched_start();
