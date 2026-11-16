@@ -45,8 +45,13 @@ void kmain(u64 hartid, u64 dtb_pa)
     printk("IFIRM-CAPS mmu=1 timer=1 plic=1 uart=1 hw_watchdog=0 "
            "kernel_hang_recovery=false controller_restart=true cache=C1\n");
 
-    if (domain_compose_all() != IFIRM_OK) {
-        board_halt(IFIRM_ERR_INVALID_STATE, "compose");
+    ifirm_status_t cst = domain_compose_all();
+    if (cst != IFIRM_OK) {
+        const char *why = (cst == IFIRM_ERR_BAD_DIGEST) ? "tpl-digest"
+                        : (cst == IFIRM_ERR_DENIED)    ? "charter-denied"
+                        : (cst == IFIRM_ERR_CORRUPT)   ? "tpl-corrupt"
+                        : "compose";
+        board_halt(cst, why);
     }
 
     printk("IFIRM-READY domains=%u pages_used=%u t_ms=%u\n",

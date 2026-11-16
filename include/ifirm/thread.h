@@ -50,7 +50,7 @@ typedef struct {
 extern thread_t g_threads[MAX_THREADS];
 extern thread_t *g_current;
 
-thread_t *thread_create(u8 dom, u64 entry, u64 arg, u64 sp);
+thread_t *thread_create(u8 dom, u64 entry, u64 arg, u64 arg2, u64 arg3, u64 sp);
 void      sched_start(void) __attribute__((noreturn));
 trap_frame_t *sched_next(trap_frame_t *f);
 void      thread_block(u64 obj);

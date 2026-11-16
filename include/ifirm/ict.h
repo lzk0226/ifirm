@@ -26,6 +26,8 @@ STATIC_ASSERT(sizeof(ict_entry_t) == 16, "ict entry frozen");
 ifirm_status_t ict_install(u8 dom, u32 function_id, u16 cap_slot, u16 flags, u32 arg_limit);
 i64            ict_dispatch(trap_frame_t *f, u32 slot);
 u32            ict_count(u8 dom);
+/* 撤销传播：把引用该 cap_slot 的槽全部标记失效，返回受影响的槽数 */
+u32            ict_revoke_cap(u8 dom, u16 cap_slot);
 void           ict_build_page(u8 dom, u8 *page);
 
 #endif /* IFIRM_ICT_H */

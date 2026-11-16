@@ -6,6 +6,7 @@
 #include <ifirm/cap.h>
 #include <ifirm/ipc.h>
 #include <ifirm/vmm.h>
+#include <ifirm/ca.h>
 #include <ifirm/status.h>
 
 u64 now_ns(void)
@@ -193,6 +194,8 @@ i64 syscall_execute(u32 nr, trap_frame_t *f)
     case SYS_IPC_RECV:    return do_ipc_recv(f);
     case SYS_IPC_REPLY:   return do_ipc_reply(f);
     case SYS_DOMAIN_INFO: return do_domain_info(f);
+    case SYS_CAP_REQUEST: return ca_request(f);
+    case SYS_CAP_REVOKE:  return ca_revoke_own(f);
     default:              return (i64)IFIRM_ERR_UNSUPPORTED;
     }
 }

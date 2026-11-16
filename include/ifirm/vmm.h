@@ -22,6 +22,7 @@ ifirm_status_t vmm_init(void);
 u64           *vmm_new_as(void);
 ifirm_status_t vmm_map(u64 *root, vaddr_t va, paddr_t pa, u64 perm);
 ifirm_status_t vmm_switch(u64 *root);
+void           vmm_release(u64 *root);
 void           vmm_flush(void);
 u64            vmm_walk(u64 *root, vaddr_t va);
 u64            vmm_walk_pte(u64 *root, vaddr_t va);

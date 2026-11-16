@@ -20,14 +20,15 @@ ifirm_status_t cap_check(cap_t h, u8 type, u16 rights, cap_entry_t **out)
     if (idx == 0u || idx >= 256u) { return IFIRM_ERR_BAD_HANDLE; }
 
     cap_entry_t *e = &d->caps[idx];
+    /* 代次先比：撤销会顶掉代次，旧句柄必须报 REVOKED 而不是"坏句柄"（§13.5） */
+    if (((e->gen_owner >> 12) & 0xFFFFFu) != ((((u32)h) & CAP_GEN_MASK) >> 12)) {
+        return IFIRM_ERR_REVOKED;
+    }
     if ((e->flags & CAP_FLAG_VALID) == 0u) { return IFIRM_ERR_BAD_HANDLE; }
     if ((e->gen_owner & 0xFFFu) != (u32)d->id) { return IFIRM_ERR_BAD_HANDLE; }
     if (type != OBJ_ANY && e->object_type != type) { return IFIRM_ERR_BAD_HANDLE; }
     if ((rights & ~CAP_RIGHTS_ALL) != 0u) { return IFIRM_ERR_DENIED; }
     if ((e->rights & rights) != rights) { return IFIRM_ERR_DENIED; }
-    if (((e->gen_owner >> 12) & 0xFFFFFu) != ((((u32)h) & CAP_GEN_MASK) >> 12)) {
-        return IFIRM_ERR_REVOKED;
-    }
     if (out != NULL) { *out = e; }
     return IFIRM_OK;
 }

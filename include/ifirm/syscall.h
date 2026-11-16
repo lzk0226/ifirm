@@ -15,6 +15,8 @@
 #define SYS_DEBUG_WRITE   8u
 #define SYS_DOMAIN_INFO   9u
 #define SYS_CONSOLE_WRITE 10u
+#define SYS_CAP_REQUEST   11u   /* a0=对象类型 a1=权限 a2=对象号 → a1=句柄 */
+#define SYS_CAP_REVOKE    12u   /* a0=句柄：撤销并传播 */
 
 #define SYS_ICT           0u   /* a7=0 表示"经 ICT 槽调用"，a6=槽号 */
 

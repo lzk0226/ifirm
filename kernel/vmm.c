@@ -116,6 +116,29 @@ u64 vmm_walk_pte(u64 *root, vaddr_t va)
     return e0;
 }
 
+/* 组合失败时的回滚：释放该地址空间拥有的每一个页（不碰内核恒等映射） */
+void vmm_release(u64 *root)
+{
+    if (root == NULL) { return; }
+    u64 e1 = root[0];
+    if ((e1 & PTE_V) != 0u && (e1 & PTE_LEAF) == 0u) {
+        u64 *l1 = (u64 *)PTE_PPN(e1);
+        for (u32 i = 0; i < 512u; i++) {
+            u64 e = l1[i];
+            if ((e & PTE_V) == 0u || (e & PTE_LEAF) != 0u) { continue; }
+            u64 *l0 = (u64 *)PTE_PPN(e);
+            for (u32 k = 0; k < 512u; k++) {
+                u64 e0 = l0[k];
+                if ((e0 & PTE_V) == 0u || (e0 & PTE_U) == 0u) { continue; }
+                pmm_free(PTE_PPN(e0) & PAGE_MASK);
+            }
+            pmm_free((u64)l0);
+        }
+        pmm_free((u64)l1);
+    }
+    pmm_free((u64)root);
+}
+
 ifirm_status_t vmm_init(void)
 {
     g_kernel_root = vmm_new_as();

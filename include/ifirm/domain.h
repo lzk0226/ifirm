@@ -37,6 +37,7 @@ typedef struct {
     cap_entry_t caps[256];
     ict_entry_t ict[ICT_MAX_ENTRIES];
     u32  faults;
+    u32  tpl_id;         /* 模板身份（FNV-1a 32 of 模板名），组合期验摘要后填入 */
     u64  ready_ms;
     const char *name;
 } domain_t;

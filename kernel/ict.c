@@ -21,6 +21,10 @@ static u16 rights_for_function(u32 fid)
     }
 }
 
+/* 影子表不进用户可见页：槽的 16 字节布局保持冻结 */
+static u16 g_slot_cap[MAX_DOMAINS][ICT_MAX_ENTRIES];
+static u8  g_slot_dead[MAX_DOMAINS][ICT_MAX_ENTRIES];
+
 ifirm_status_t ict_install(u8 dom, u32 function_id, u16 cap_slot, u16 flags, u32 arg_limit)
 {
     domain_t *d = domain_get(dom);
@@ -47,8 +51,23 @@ ifirm_status_t ict_install(u8 dom, u32 function_id, u16 cap_slot, u16 flags, u32
     d->ict[slot].flags = flags;
     d->ict[slot].cap_slot = cap_slot;
     d->ict[slot].arg_limit = arg_limit;
+    g_slot_cap[dom][slot] = ((flags & ICT_F_NEEDS_CAP) != 0u) ? cap_slot : 0u;
+    g_slot_dead[dom][slot] = 0u;
     d->ict[slot].function_id = function_id;
     return IFIRM_OK;
+}
+
+u32 ict_revoke_cap(u8 dom, u16 cap_slot)
+{
+    u32 n = 0;
+    if (dom >= MAX_DOMAINS || cap_slot == 0u) { return 0u; }
+    for (u32 i = 0; i < ICT_MAX_ENTRIES; i++) {
+        if (g_slot_cap[dom][i] != cap_slot) { continue; }
+        if (g_slot_dead[dom][i] != 0u) { continue; }
+        g_slot_dead[dom][i] = 1u;
+        n++;
+    }
+    return n;
 }
 
 u32 ict_count(u8 dom)
@@ -73,6 +92,7 @@ i64 ict_dispatch(trap_frame_t *f, u32 slot)
 
     if ((e->flags & ICT_F_NEEDS_CAP) != 0u) {
         if (e->cap_slot == 0u || e->cap_slot >= 256u) { return (i64)IFIRM_ERR_BAD_HANDLE; }
+        if (g_slot_dead[d->id][slot] != 0u) { return (i64)IFIRM_ERR_REVOKED; }  /* 撤销已传播到此槽 */
         cap_entry_t *ce = &d->caps[e->cap_slot];
         if ((ce->flags & CAP_FLAG_VALID) == 0u) { return (i64)IFIRM_ERR_BAD_HANDLE; }
         u16 need = rights_for_function(e->function_id);

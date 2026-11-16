@@ -5,6 +5,7 @@
 #include <ifirm/console.h>
 #include <ifirm/trap.h>
 #include <ifirm/sbi.h>
+#include <ifirm/ca.h>
 
 #define SSTATUS_SPIE (1ull << 5)
 
@@ -15,7 +16,7 @@ domain_t *g_current_domain;
 static u32 g_rr;
 static bool g_halted;
 
-thread_t *thread_create(u8 dom, u64 entry, u64 arg, u64 sp)
+thread_t *thread_create(u8 dom, u64 entry, u64 arg, u64 arg2, u64 arg3, u64 sp)
 {
     for (u32 i = 0; i < MAX_THREADS; i++) {
         thread_t *t = &g_threads[i];
@@ -25,6 +26,8 @@ thread_t *thread_create(u8 dom, u64 entry, u64 arg, u64 sp)
         t->tf.sepc = entry;
         t->tf.x[REG_SP] = sp;
         t->tf.x[REG_A0] = arg;
+        t->tf.x[REG_A1] = arg2;
+        t->tf.x[REG_A2] = arg3;
         t->wait_obj = 0u;
         t->wake_val = 0u;
         t->blk_buf = 0u;
@@ -103,6 +106,9 @@ trap_frame_t *sched_next(trap_frame_t *f)
     if (next == NULL) {
         if (!g_halted) {
             g_halted = true;
+            printk("IFIRM-CA requests=%u grants=%u denied=%u revokes=%u\n",
+                   (u32)ca_requests_total(), (u32)ca_grants_total(),
+                   (u32)ca_denied_total(), (u32)ca_revokes_total());
             printk("IFIRM-HALT all-threads-exited blocked=%u t_ms=%u\n",
                    any_blocked() ? 1u : 0u, (u32)(trap_ticks() * 10ull));
         }
