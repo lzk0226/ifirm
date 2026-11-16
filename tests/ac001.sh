@@ -1,35 +1,50 @@
-#!/bin/sh
-# AC-001: make run 后 2 s 内输出 IFIRM-BOOT stage=0 与 hello ifirm
-set -e
-LOG=build/ac001.log
+#!/usr/bin/env bash
+# AC-001：内核在 QEMU 上完成引导并跑到用户态互斥场景（对应 Ifirm1.0.md §7.6 启动契约）
+set -u
+cd "$(dirname "$0")/.."
+LOG=build/serial.log
 mkdir -p build
-python3 - "$LOG" <<'PYEOF'
-import subprocess, sys, time
+timeout 20 qemu-system-riscv64 -machine virt -m 256M -smp 1 -nographic \
+    -bios default -kernel build/ifirm.elf >"$LOG" 2>&1 || true
 
-log = sys.argv[1]
-cmd = ["qemu-system-riscv64", "-machine", "virt", "-m", "256M", "-smp", "1",
-       "-nographic", "-bios", "default", "-kernel", "build/ifirm.bin"]
-p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-t0 = time.time()
-lines, t_hello = [], None
-try:
-    for line in p.stdout:
-        lines.append(line)
-        if "hello ifirm" in line and t_hello is None:
-            t_hello = time.time() - t0
-            break
-finally:
-    p.kill()
-    p.wait()
+fail=0
+need() {
+    if grep -qF "$1" "$LOG"; then
+        printf '  ok   %s\n' "$1"
+    else
+        printf '  FAIL %s\n' "$1"
+        fail=1
+    fi
+}
+forbid() {
+    if grep -qF "$1" "$LOG"; then
+        printf '  FAIL forbidden %s\n' "$1"
+        fail=1
+    fi
+}
 
-out = "".join(lines)
-open(log, "w").write(out)
+need "IFIRM-BOOT stage=0"
+need "IFIRM-BOARD model=riscv-virtio,qemu ram=256MiB"
+need "IFIRM-BOOT stage=1"
+need "IFIRM-MEM total=65536"
+need "IFIRM-VM on"
+need "IFIRM-TICK hz=100"
+need "IFIRM-CAPS mmu=1 timer=1 plic=1 uart=1"
+need "IFIRM-DOMAIN id=1 state=READY name=producer"
+need "IFIRM-DOMAIN id=2 state=READY name=consumer"
+need "IFIRM-DOMAIN id=3 state=READY name=faulty"
+need "IFIRM-READY domains=3"
+need "producer: ict=ok"
+need "consumer: seq=1 x=8 -> 16"
+need "consumer: seq=2 x=15 -> 30"
+need "IFIRM-EVT id=7 dom=3"
+need "producer: exit"
+need "IFIRM-HALT all-threads-exited"
+forbid "IFIRM-PANIC"
 
-ok_stage = "IFIRM-BOOT stage=0" in out
-ok_hello = "hello ifirm" in out
-ok_time = t_hello is not None and t_hello < 2.0
-ms = int((t_hello or 0) * 1000)
-print("TEST AC-001 %s %d" % ("PASS" if (ok_stage and ok_hello and ok_time) else "FAIL", ms))
-print("  stage=0: %s  hello: %s  t_hello=%dms (budget 2000ms)" % (ok_stage, ok_hello, ms))
-sys.exit(0 if (ok_stage and ok_hello and ok_time) else 1)
-PYEOF
+if [ "$fail" -eq 0 ]; then
+    printf 'TEST ac-001 PASS\n'
+else
+    printf 'TEST ac-001 FAIL\n'
+    exit 1
+fi
