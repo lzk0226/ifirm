@@ -432,6 +432,20 @@ static i64 do_fs_stat(trap_frame_t *f)
     return 0;
 }
 
+/* 取异步授权结果：完成时把句柄写回用户缓冲 */
+static i64 do_cap_poll(trap_frame_t *f)
+{
+    if (g_current_domain == NULL) { return (i64)IFIRM_ERR_INVALID_STATE; }
+    cap_t h = 0u;
+    i64 st = ca_queue_poll((u32)f->x[REG_A0], &h);
+    if (st == 0) {
+        ifirm_status_t cs = xcopy(g_current_domain->root, (vaddr_t)f->x[REG_A1],
+                                  &h, sizeof(h), true);
+        if (cs != IFIRM_OK) { return (i64)cs; }
+    }
+    return st;
+}
+
 i64 syscall_execute(u32 nr, trap_frame_t *f)
 {
     switch (nr) {
@@ -451,6 +465,7 @@ i64 syscall_execute(u32 nr, trap_frame_t *f)
     case SYS_CAP_REQUEST:   return ca_request(f);
     case SYS_CAP_REVOKE:    return ca_revoke_own(f);
     case SYS_CAP_DELEGATE:  return ca_delegate(f);
+    case SYS_CAP_POLL:      return do_cap_poll(f);
     case SYS_CAP_AUDIT:     return do_cap_audit(f);
     case SYS_SPAWN:         return do_spawn(f);
     case SYS_WAIT:          return do_wait(f);

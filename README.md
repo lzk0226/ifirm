@@ -1,16 +1,34 @@
-# Ifirm 内核 v4（三要素最小系统 + 可用的用户态）
+# Ifirm 内核 v4.1（三要素 + 可用的用户态 + CA 授权队列）
 
-按 Ifirm1.0.md 实现的 RISC-V 64 微内核。v4 的判据是用户提的那三个要素必须能跑起来，
+按 Ifirm1.0.md 实现的 RISC-V 64 微内核。v4/v4.1 的判据是用户提的那三个要素必须能跑起来，
 其余一切（网络、图形、SMP、持久化）都不在本版范围内：
 
 | 要素 | v4 的落地方式 | 可以被证伪的地方 |
 |---|---|---|
-| 中央授权控制器 CA | 策略不在代码里，而在 charter 镜像里（32 字节头 + 12 字节/条规则）；唯一授权入口 ca_authorize()；派生树 + 树形撤销；256 条审计环；4 个计数器 | 改 charter 一个字节 → 摘要对不上 → IFIRM-COMP FAIL name=ca，一条 IFIRM-DOMAIN 都不出现（ac004） |
+| 中央授权控制器 CA | 策略不在代码里，而在 charter 镜像里（32 字节头 + 12 字节/条规则）；唯一授权入口 ca_authorize()；派生树 + 树形撤销；256 条审计环；8 槽授权队列（满即 -AGAIN 背压、时钟片里批量处理、申请者凭票号轮询）；4 个计数器 | 改 charter 一个字节 → 摘要对不上 → IFIRM-COMP FAIL name=ca，一条 IFIRM-DOMAIN 都不出现（ac004） |
 | 复合内核 | 13 个内核原子组件按声明（名字/提供/依赖/层号）组合，内核自己校验层号单调、依赖已被提供，并对每个组件算 FNV-1a32 摘要，最后给出整体 IFIRM-COMPOSE digest | 任一组件缺失或层号错乱 → IFIRM-COMP FAIL name=<组件>，引导在 stage=2 之前停住 |
 | 原子组件 | 用户态模板是带 v2 清单的镜像：magic/版本/ABI/名字/服务位/栈页/摘要；内核侧注册表按名字查表，组合期检查"计划要的能力模板是否声明" | 篡改模板一个字节 → 摘要不符 → IFIRM-COMP FAIL name=tpl，没有 READY（ac002） |
 
 外加一条同样重要的判据：**用户态真的能用**。shell、coreutils、可写文件系统、ELF 加载、
 进程创建/等待全部在磁盘上而不是编进内核（ac003 检查 `loaded from disk (elf)` 在内核映像里 0 次、磁盘里 ≥1 次）。
+
+## CA 授权队列
+
+同步路径（a3=0）是“调用即授权”，够用但不满足“CA 是中介”：域会被卡在 ecall 上等策略判定。
+v4.1 补的是异步路径，语义只有三条：
+
+| 动作 | 接口 | 语义 |
+|---|---|---|
+| 入队 | SYS_CAP_REQUEST，a3 的 bit0 = 1 | 不判定策略，只占一个槽；成功返回**票号**（a1），队列满返回 -AGAIN |
+| 处理 | 时钟中断里 ca_drain() | 按票号从小到大（FIFO）逐条走 ca_authorize()，不占内核线程 |
+| 取结果 | SYS_CAP_POLL（27），a0=票号 a1=&句柄 | 0 完成（句柄写回 a1 指向的用户地址）、-11 未处理、其它为拒绝码 |
+
+票号是 (代次 << 8) | 槽位，槽位复用时**代次递增**：旧票号因此永远取不到新请求的结果，不存在 ABA。
+队列满不是策略拒绝（不记 deny、不增 denied 计数），调用者应当稍后重试。
+
+ac005 用三组断言把它钉住：启动期自检必须打出 depth=8 full=-11 drained=8 ok=5 deny=3 test=ok
+（5 条 charter 允许 + 3 条不允许填满 8 槽，第 9 条被背压）、域 1 必须拿到票号而不是阻塞、
+票号最终必须被处理成 st=0 并撤销成功。
 
 ## 启动序列（一次 make run 能看到的）
 
@@ -23,6 +41,8 @@ IFIRM-VM on / IFIRM-TICK hz=100 / IFIRM-CAPS mmu=1 timer=1 plic=1 uart=1 ...
 IFIRM-COMP n=1 name=board lvl=1 digest=0x..        ← 13 条，内核原子组件
 ...
 IFIRM-CA charter=0x9a0b264 rules=9 digest=0x..
+IFIRM-CA drain n=8 depth=8 t=108                                    ← 启动期自检
+IFIRM-CA queue depth=8 full=-11 drained=8 ok=5 deny=3 test=ok
 IFIRM-TPL n=1 name=producer ver=2 abi=1 svc=0x3 stack=4 digest=0x..
 IFIRM-TPLSET n=3 ok digest=0x..
 IFIRM-DOMAIN id=1 state=READY name=producer tpl=0x.. tplname=producer ict=1 pages=8
@@ -33,6 +53,15 @@ IFIRM-INIT name=sh dom=6 entry=0x10000 pages=2
 IFIRM-COMP n=13 name=init lvl=9 digest=0x..
 IFIRM-COMPOSE n=13 ok digest=0x..
 IFIRM-BOOT stage=2
+~~~
+
+调度开始后，域 1 走一次异步申请（不阻塞）：
+
+~~~text
+producer[1]: ca async ticket=2304
+IFIRM-CA drain n=1 depth=1 t=365
+producer[1]: ca async done st=0 h=57348
+producer[1]: ca async revoke=0
 ~~~
 
 任何一步失败都打 `IFIRM-COMP FAIL name=<组件> st=<状态码>` 或 `IFIRM-BOOT FAIL <原因> (<码>)` 并停机。
@@ -94,6 +123,7 @@ IFIRM-HALT all-threads-exited blocked=0 t_ms=9760
 13 CAP_DELEGATE 14 CAP_AUDIT 15 SPAWN    16 WAIT         17 CONSOLE_READ
 18 FS_OPEN   19 FS_READ   20 FS_WRITE  21 FS_CLOSE    22 FS_UNLINK
 23 FS_READDIR 24 FS_STAT  25 PROC_LIST 26 FS_MKDIR
+27 CAP_POLL
 ```
 
 返回值约定：a0 = 状态码（0 成功、负数为错误），需要额外结果的调用把值放在 a1
@@ -108,7 +138,7 @@ IFIRM-HALT all-threads-exited blocked=0 t_ms=9760
 ~~~sh
 make          # mkimg ×3 → blobs.o → ifirm.elf；mkcharter → charter.bin；mkfs → disk.img
 make run      # QEMU 串口输出到当前终端（20 秒自动退出）
-make test     # AC-001（正向 38 项）+ AC-002/003/004（三个负向）
+make test     # AC-001（正向 38 项）+ AC-002/003/004（三个负向）+ AC-005（授权队列）
 ~~~
 
 QEMU 参数固定：`-machine virt -m 256M -smp 1 -nographic -bios default` +
@@ -122,23 +152,23 @@ QEMU 参数固定：`-machine virt -m 256M -smp 1 -nographic -bios default` +
 | boot/start.S | 入口、清 .bss、跳到 C |
 | arch/rv64/ | UART（含接收）、SBI、陷阱入口与分发 |
 | kernel/component.c | 复合内核：13 个原子组件的声明、层号/依赖校验、组合摘要 |
-| kernel/ca.c | 中央授权控制器：charter 解析、规则匹配、审计环、派生与树形撤销 |
+| kernel/ca.c | 中央授权控制器：charter 解析、规则匹配、审计环、派生与树形撤销、8 槽授权队列 |
 | kernel/template.c + tplreg.c | 模板 v2 清单校验与注册表 |
 | kernel/cap.c | 能力表、代次、派生链、撤销传播到 ICT |
 | kernel/domain.c / spawn.c | 静态组合五个域 / 从磁盘 spawn 新域（argv 拷到用户栈） |
 | kernel/fs.c + virtio.c + elf.c | IFIRMFS2、virtio-mmio 块设备、ELF64 加载器 |
-| kernel/syscall.c | 26 个系统调用 + 用户指针校验 |
+| kernel/syscall.c | 27 个系统调用 + 用户指针校验 |
 | user/ | ulib.h + shell + 六个程序 + 三个模板 |
 | tools/ | mkimg（模板打包）、mkfs（磁盘镜像）、mkcharter（策略编译） |
-| tests/ | ac001 正向、ac002 篡改模板、ac003 用 shell 跑完整用户态、ac004 篡改 charter |
+| tests/ | ac001 正向、ac002 篡改模板、ac003 用 shell 跑完整用户态、ac004 篡改 charter、ac005 授权队列 |
 
-规模：源码 5,596 行（kernel/arch/user/tools/include/boot），内核映像 text 33,946 + data 8,280 + bss 270,268 字节。
+规模：源码 5,835 行（kernel/arch/user/tools/include/boot），内核映像 text 36,322 + data 10,648 + bss 270,460 字节。
 
 ## 仍然有意省略
 
 - 无 SMP、无 PLIC/设备中断、无 DMA、无抢占（时间片只在陷阱返回时轮转）、无掉电持久化。
 - 无 KIP 页、无 journal、无模板注册表缓存（CAC/IRC/BBC 只打印 cache=C1）。
-- CA 不建内核线程，没有异步队列；撤销是同步扫表。
+- CA 不建内核线程：授权队列只在时钟中断里批量处理，没有独立的 CA 线程、优先级和取消；撤销仍是同步扫表。
 - 文件系统有日志之外的一切简化：无硬链接语义、无权限位、无时间戳更新（mtime 只写一次）。
 - 域崩溃只打印 + 杀线程，不重启；没有真实驱动模型，控制台是唯一设备。
 

@@ -5,6 +5,7 @@
 #include <ifirm/sbi.h>
 #include <ifirm/syscall.h>
 #include <ifirm/trap.h>
+#include <ifirm/ca.h>
 
 #define SSTATUS_SPP  (1ull << 8)
 #define SCAUSE_INT   (1ull << 63)
@@ -60,6 +61,8 @@ trap_frame_t *trap_dispatch(trap_frame_t *f)
         if ((f->scause & 0xFFull) == IRQ_S_TIMER) {
             g_ticks++;
             timer_arm();
+            /* 时钟片边界是 CA 处理授权队列的唯一时机：队列本身不占内核线程 */
+            (void)ca_drain();
         }
     } else if (f->scause == 8u) {
         syscall_dispatch(&t->tf);

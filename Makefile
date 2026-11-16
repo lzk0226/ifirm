@@ -120,6 +120,7 @@ test: build/ifirm.elf build/disk.img
 	bash tests/ac002.sh
 	bash tests/ac003.sh
 	bash tests/ac004.sh
+	bash tests/ac005.sh
 
 clean:
 	rm -rf build

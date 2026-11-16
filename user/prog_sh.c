@@ -20,7 +20,7 @@ typedef struct {
     u32 t_ms;
 } audit_t;
 
-static const char *const k_kind[] = { "?", "req", "grant", "deny", "revoke", "deleg" };
+static const char *const k_kind[] = { "?", "req", "grant", "deny", "revoke", "deleg", "enq" };
 static const char *const k_state[] = { "free", "ready", "running", "dead" };
 
 static int read_line(void)
@@ -94,7 +94,7 @@ static void cmd_ca(void)
     if (n < 0) { cprintf("ca: st=%d\n", n); return; }
     cprintf("CA audit (newest first, %d shown)\n", n);
     for (i64 i = 0; i < n; i++) {
-        const char *k = (e[i].kind < 6u) ? k_kind[e[i].kind] : "?";
+        const char *k = (e[i].kind < 7u) ? k_kind[e[i].kind] : "?";
         cprintf("  %s dom=%d type=%d rights=%x obj=%d st=%d t=%dms\n",
                 k, (i64)e[i].dom, (i64)e[i].type, (i64)e[i].rights,
                 (i64)e[i].object, e[i].result, (i64)e[i].t_ms);

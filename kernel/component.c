@@ -176,7 +176,11 @@ static ifirm_status_t comp_fs(void)
     return IFIRM_OK;
 }
 
-static ifirm_status_t comp_spawn(void) { return IFIRM_OK; }
+static ifirm_status_t comp_spawn(void)
+{
+    /* 自检必须在域组合之后：CA 的 grant 要求目标域真实存在（cap.c:41） */
+    return ca_queue_selftest();
+}
 
 /* 最后一个组件：把用户态的第一个程序（shell）拉起来 */
 static ifirm_status_t comp_init(void)

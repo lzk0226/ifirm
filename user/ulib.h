@@ -37,6 +37,7 @@ typedef long long          i64;
 #define SYS_FS_STAT       24
 #define SYS_PROC_LIST     25
 #define SYS_FS_MKDIR      26
+#define SYS_CAP_POLL      27
 
 #define OBJ_TEMPLATE 1
 #define OBJ_DOMAIN   2
@@ -171,6 +172,29 @@ static inline i64 ict_write(const char *s, u64 n)
 }
 
 #define sys5_ret1(n, a0, a1, a2, a3) sys6((n), (a0), (a1), (a2), (a3), 0)
+
+/* 异步能力申请：a3 的 bit0 置 1 表示只入队；成功时返回票号（a1） */
+static inline i64 cap_req_async(u64 type, u64 rights, u64 obj)
+{
+    register i64 r0 __asm__("a0") = (i64)type;
+    register i64 r1 __asm__("a1") = (i64)rights;
+    register i64 r2 __asm__("a2") = (i64)obj;
+    register i64 r3 __asm__("a3") = 1;
+    register i64 r7 __asm__("a7") = SYS_CAP_REQUEST;
+    __asm__ volatile ("ecall" : "+r"(r0), "+r"(r1) : "r"(r2), "r"(r3), "r"(r7) : "memory");
+    if (r0 != 0) { return r0; }
+    return r1;
+}
+
+/* 取异步结果：0 完成（句柄写进 out）、-11 还没轮到、其它为拒绝码 */
+static inline i64 cap_poll(i64 ticket, u64 *out)
+{
+    register i64 r0 __asm__("a0") = ticket;
+    register i64 r1 __asm__("a1") = (i64)out;
+    register i64 r7 __asm__("a7") = SYS_CAP_POLL;
+    __asm__ volatile ("ecall" : "+r"(r0), "+r"(r1) : "r"(r7) : "memory");
+    return r0;
+}
 
 static inline void dbg(const char *s)
 {

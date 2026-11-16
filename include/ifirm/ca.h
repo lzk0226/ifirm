@@ -25,6 +25,8 @@
 #define CA_LOG_DENY     3u
 #define CA_LOG_REVOKE   4u
 #define CA_LOG_DELEGATE 5u
+#define CA_LOG_ENQUEUE  6u   /* 入队（异步申请） */
+#define CA_LOG_DRAIN    7u
 
 typedef struct {
     u32 kind;
@@ -40,6 +42,10 @@ STATIC_ASSERT(sizeof(ca_audit_t) == 28u, "ca audit record frozen");
 
 ifirm_status_t ca_init(void);
 
+/* 授权请求队列（§14.4 的异步形态）：固定槽位，满时 -AGAIN 形成背压 */
+#define CA_QUEUE_MAX 8u
+#define CA_REQ_ASYNC 1u        /* SYS_CAP_REQUEST 的 a3 bit0：只入队，不等待 */
+
 u64 ca_requests_total(void);
 u64 ca_grants_total(void);
 u64 ca_denied_total(void);
@@ -53,6 +59,13 @@ ifirm_status_t ca_authorize(u8 dom, u8 type, u16 rights, u32 object_id, u8 phase
 i64 ca_request(trap_frame_t *f);     /* syscall 11：域在运行期申请能力 */
 i64 ca_revoke_own(trap_frame_t *f);  /* syscall 12：撤销自身句柄并沿派生链传播 */
 i64 ca_delegate(trap_frame_t *f);    /* syscall 13：把句柄派生给另一个域 */
+
+/* 队列：入队 → 时钟中断里批量处理 → 申请者轮询取结果 */
+i64 ca_enqueue(u8 dom, u8 type, u16 rights, u32 object_id, u8 phase);
+i64 ca_queue_poll(u32 ticket, cap_t *out);   /* 0 完成 / -AGAIN 未处理 */
+u32 ca_drain(void);                          /* 处理所有待决项，返回条数 */
+u32 ca_queue_depth(void);
+i64 ca_queue_selftest(void);                 /* 启动期自检：满、背压、批量 */
 
 u32  ca_audit_count(void);
 bool ca_audit_at(u32 i, ca_audit_t *out);   /* i=0 是最新一条 */

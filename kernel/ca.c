@@ -36,6 +36,23 @@ static u64 g_revokes;
 static ca_audit_t g_log[CA_LOG_MAX];
 static u32 g_log_n;          /* 累计写入条数（环形，取模） */
 
+/* 队列槽位：PENDING 待处理、DONE 已出结果等申请者取走、FREE 可复用 */
+#define CA_Q_FREE    0u
+#define CA_Q_PENDING 1u
+#define CA_Q_DONE    2u
+
+typedef struct {
+    u32 ticket;        /* (代次 << 8) | 槽位 */
+    u8  dom;
+    u8  type;
+    u8  phase;
+    u8  state;
+    u16 rights;
+    u32 object_id;
+    i32 result;
+    cap_t cap;
+} ca_qent_t;
+
 static u64 fnv64(const u8 *p, u64 n)
 {
     u64 h = 1469598103934665603ull;
@@ -151,6 +168,132 @@ ifirm_status_t ca_authorize(u8 dom, u8 type, u16 rights, u32 object_id, u8 phase
     return IFIRM_ERR_DENIED;
 }
 
+/* ---------- 授权请求队列 ----------
+ * 域用 SYS_CAP_REQUEST + (a3 & CA_REQ_ASYNC) 入队，内核在时钟中断里批量处理，
+ * 用户态用 SYS_CAP_POLL 取结果。票号 = (代次 << 8) | 槽位：槽位复用时代次递增，
+ * 旧票号因此永远取不到新请求的结果（没有 ABA）。
+ */
+static ca_qent_t g_q[CA_QUEUE_MAX];
+static u32 g_q_gen;
+
+u32 ca_queue_depth(void)
+{
+    u32 n = 0u;
+    for (u32 i = 0; i < CA_QUEUE_MAX; i++) {
+        if (g_q[i].state != CA_Q_FREE) { n++; }
+    }
+    return n;
+}
+
+i64 ca_enqueue(u8 dom, u8 type, u16 rights, u32 object_id, u8 phase)
+{
+    for (u32 i = 0; i < CA_QUEUE_MAX; i++) {
+        if (g_q[i].state != CA_Q_FREE) { continue; }
+        g_q_gen++;
+        g_q[i].ticket = (g_q_gen << 8) | i;
+        g_q[i].dom = dom;
+        g_q[i].type = type;
+        g_q[i].phase = phase;
+        g_q[i].rights = rights;
+        g_q[i].object_id = object_id;
+        g_q[i].result = 0;
+        g_q[i].cap = 0u;
+        g_q[i].state = CA_Q_PENDING;
+        ca_log(CA_LOG_ENQUEUE, dom, type, rights, object_id, 0);
+        return (i64)g_q[i].ticket;
+    }
+    /* 队列满：拒绝入队，调用者稍后重试（背压，不是策略拒绝） */
+    ca_log(CA_LOG_ENQUEUE, dom, type, rights, object_id, (i32)IFIRM_ERR_AGAIN);
+    return (i64)IFIRM_ERR_AGAIN;
+}
+
+u32 ca_drain(void)
+{
+    u32 done = 0u;
+    for (;;) {
+        ca_qent_t *pick = NULL;
+        /* 票号最小的先处理：入队顺序即授权顺序（FIFO） */
+        for (u32 i = 0; i < CA_QUEUE_MAX; i++) {
+            if (g_q[i].state != CA_Q_PENDING) { continue; }
+            if (pick == NULL || (i32)(g_q[i].ticket - pick->ticket) < 0) { pick = &g_q[i]; }
+        }
+        if (pick == NULL) { break; }
+        cap_t h = 0u;
+        pick->result = (i32)ca_authorize(pick->dom, pick->type, pick->rights,
+                                         pick->object_id, pick->phase, &h);
+        pick->cap = h;
+        pick->state = CA_Q_DONE;
+        done++;
+    }
+    if (done != 0u) {
+        printk("IFIRM-CA drain n=%u depth=%u t=%u\n",
+               (u32)done, (u32)ca_queue_depth(), (u32)now_ms());
+    }
+    return done;
+}
+
+i64 ca_queue_poll(u32 ticket, cap_t *out)
+{
+    u32 slot = ticket & 0xFFu;
+    u32 gen  = ticket >> 8;
+    if (slot >= CA_QUEUE_MAX || gen == 0u) { return (i64)IFIRM_ERR_INVALID_ARG; }
+    ca_qent_t *e = &g_q[slot];
+    if (e->state == CA_Q_FREE || (e->ticket >> 8) != gen) {
+        return (i64)IFIRM_ERR_NOT_FOUND;
+    }
+    if (e->state == CA_Q_PENDING) { return (i64)IFIRM_ERR_AGAIN; }
+    i32 r = e->result;
+    if (r == 0 && out != NULL) { *out = e->cap; }
+    e->state = CA_Q_FREE;
+    e->cap = 0u;
+    return (i64)r;
+}
+
+/* 启动期自检：必须能在域组合之后跑（cap.c 的 grant 要求目标域存在） */
+i64 ca_queue_selftest(void)
+{
+    i64 tk[CA_QUEUE_MAX];
+    u32 want_ok = 0u;
+    u32 want_deny = 0u;
+    for (u32 i = 0; i < CA_QUEUE_MAX; i++) {
+        if (i < 5u) {
+            tk[i] = ca_enqueue(1u, OBJ_DEVICE, CAP_RIGHT_WRITE, 1u, CA_BOOT);
+            want_ok++;
+        } else {
+            /* 域 3 在 charter 里没有任何规则：CA 必须拒绝 */
+            tk[i] = ca_enqueue(3u, OBJ_DEVICE, CAP_RIGHT_WRITE, 1u, CA_BOOT);
+            want_deny++;
+        }
+    }
+    i64 full = ca_enqueue(1u, OBJ_DEVICE, CAP_RIGHT_WRITE, 1u, CA_BOOT);
+    u32 depth_full = ca_queue_depth();
+    u32 drained = ca_drain();
+
+    u32 ok = 0u;
+    u32 deny = 0u;
+    u32 bad = 0u;
+    for (u32 i = 0; i < CA_QUEUE_MAX; i++) {
+        if (tk[i] <= 0) { bad++; continue; }
+        cap_t h = 0u;
+        i64 st = ca_queue_poll((u32)tk[i], &h);
+        if (st == 0) {
+            ok++;
+            (void)cap_revoke(1u, (u16)((u32)h & CAP_IDX_MASK));
+        } else if (st == (i64)IFIRM_ERR_DENIED) {
+            deny++;
+        } else {
+            bad++;
+        }
+    }
+
+    bool pass = (depth_full == CA_QUEUE_MAX) && (full == (i64)IFIRM_ERR_AGAIN) &&
+                (drained == CA_QUEUE_MAX) && (ok == want_ok) && (deny == want_deny) &&
+                (bad == 0u) && (ca_queue_depth() == 0u);
+    printk("IFIRM-CA queue depth=%u full=%d drained=%u ok=%u deny=%u test=%s\n",
+           (u32)depth_full, (i32)full, (u32)drained, (u32)ok, (u32)deny,
+           pass ? "ok" : "fail");
+    return pass ? IFIRM_OK : IFIRM_ERR_INVALID_STATE;
+}
 i64 ca_request(trap_frame_t *f)
 {
     if (g_current_domain == NULL) { return (i64)IFIRM_ERR_INVALID_STATE; }
@@ -164,6 +307,14 @@ i64 ca_request(trap_frame_t *f)
         g_denied++;
         ca_log(CA_LOG_DENY, (u8)g_current_domain->id, type, rights, obj, (i32)IFIRM_ERR_INVALID_ARG);
         return (i64)IFIRM_ERR_INVALID_ARG;
+    }
+
+    if ((f->x[REG_A3] & CA_REQ_ASYNC) != 0u) {
+        /* 异步申请：只入队，票号放在 a1；内核在下一个时钟片里处理 */
+        i64 tk = ca_enqueue((u8)g_current_domain->id, type, rights, obj, CA_RUNTIME);
+        if (tk < 0) { return tk; }
+        f->x[REG_A1] = (u64)tk;
+        return 0;
     }
 
     ca_log(CA_LOG_REQUEST, (u8)g_current_domain->id, type, rights, obj, 0);

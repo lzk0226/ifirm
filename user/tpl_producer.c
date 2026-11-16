@@ -30,6 +30,34 @@ void _start(u64 chan, u64 con, u64 inst)
         l_str(&l, " cap=");        l_u64(&l, (u64)h2);
         l_flush(&l);
 
+        /* 异步路径：先入队拿票号，等内核在时钟中断里处理完再取结果 */
+        i64 tk = cap_req_async(OBJ_DEVICE, CAP_WRITE, 1);
+        l_tag(&l, "producer", inst);
+        l_str(&l, "ca async ticket="); l_i64(&l, tk);
+        l_flush(&l);
+
+        u64 ah = 0u;
+        i64 ast = -11;
+        for (u32 spin = 0; spin < 200000u; spin++) {
+            ast = cap_poll(tk, &ah);
+            if (ast != -11) { break; }
+        }
+        l_tag(&l, "producer", inst);
+        l_str(&l, "ca async done st="); l_i64(&l, ast);
+        l_str(&l, " h=");             l_u64(&l, ah);
+        l_flush(&l);
+
+        if (ast == 0) {
+            i64 arv = sys5(SYS_CAP_REVOKE, (i64)ah, 0, 0, 0, 0);
+            l_tag(&l, "producer", inst);
+            l_str(&l, "ca async revoke="); l_i64(&l, arv);
+            l_flush(&l);
+        } else {
+            l_tag(&l, "producer", inst);
+            l_str(&l, "ca async lost");
+            l_flush(&l);
+        }
+
         /* 撤销 console 能力：ICT 槽必须同步失效 */
         i64 rv = sys5(SYS_CAP_REVOKE, (i64)con, 0, 0, 0, 0);
         l_tag(&l, "producer", inst);

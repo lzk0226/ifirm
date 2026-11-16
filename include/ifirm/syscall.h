@@ -31,6 +31,7 @@
 #define SYS_FS_STAT       24u   /* a0=路径 a1=长度 a2=缓冲 */
 #define SYS_PROC_LIST     25u   /* a0=序号 a1=缓冲 → a1=1 有 0 结束 */
 #define SYS_FS_MKDIR      26u   /* a0=路径 a1=长度 */
+#define SYS_CAP_POLL      27u   /* a0=票号 a1=句柄缓冲 → 0 完成 -11 未完成 */
 
 #define SYS_ICT           0u   /* a7=0 表示"经 ICT 槽调用"，a6=槽号 */
 
