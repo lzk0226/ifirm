@@ -1,0 +1,57 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang lld binutils-riscv64-linux-gnu gcc-riscv64-linux-gnu \
+            qemu-system-misc make
+
+      - name: Versions
+        run: |
+          clang --version | head -1
+          ld.lld --version
+          qemu-system-riscv64 --version | head -1
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Size report
+        run: |
+          ls -l build/ifirm.elf build/disk.img
+          riscv64-linux-gnu-size build/ifirm.elf || true
+
+      - name: AC-001 boot, composition, CA
+        run: bash tests/ac001.sh
+
+      - name: AC-002 tampered template must fail composition
+        run: bash tests/ac002.sh
+
+      - name: AC-004 tampered charter must fail composition
+        run: bash tests/ac004.sh
+
+      - name: Upload serial logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: serial-logs
+          path: |
+            build/serial.log
+            build/serial-corrupt.log
+            build/serial-charter.log
+          if-no-files-found: ignore

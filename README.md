@@ -1,5 +1,7 @@
 # Ifirm 内核 v4.2（三要素 + 可用的用户态 + CA 授权队列 + 缺陷修复）
 
+中文 · [English](README.en.md) · [架构说明](docs/architecture.md) · [安全边界](SECURITY.md) · [Apache-2.0](LICENSE)
+
 按 Ifirm1.0.md 实现的 RISC-V 64 微内核。v4/v4.1 的判据是用户提的那三个要素必须能跑起来，
 其余一切（网络、图形、SMP、持久化）都不在本版范围内：
 
@@ -165,6 +167,13 @@ QEMU 参数固定：`-machine virt -m 256M -smp 1 -nographic -bios default` +
 | tests/ | ac001 正向、ac002 篡改模板、ac003 用 shell 跑完整用户态、ac004 篡改 charter、ac005 授权队列、ac006 缺陷回归 |
 
 规模：源码 6,117 行（kernel/arch/user/tools/include/boot），内核映像 text 35,354 + data 10,656 + bss 270,460 字节。
+
+## 开源与许可
+
+Apache-2.0，见 [LICENSE](LICENSE)。英文说明见 [README.en.md](README.en.md)，架构与对比见
+[docs/architecture.md](docs/architecture.md)，威胁模型与已知弱点见 [SECURITY.md](SECURITY.md)。
+CI 只做构建 + 三个不依赖键盘输入的验收（AC-001/002/004），因为完整套件在 TCG 上约 80 秒且
+有三处依赖 sleep 的串口时序。
 
 ## 仍然有意省略
 
